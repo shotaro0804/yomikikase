@@ -296,6 +296,72 @@ input::placeholder, textarea::placeholder { color: var(--dim); }
   color: var(--danger); font-size: 11px; cursor: pointer;
   background: none; border: none; padding: 0;
 }
+
+/* テーマ・要素（細かい設定）の入力枠 */
+textarea#theme {
+  min-height: 130px;
+  resize: vertical;
+  line-height: 1.7;
+}
+.field-hint { font-size: 11px; color: var(--dim); line-height: 1.6; margin-top: 6px; }
+
+/* 物語上部のツールバー（よみあげ・修正） */
+.story-toolbar {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.tts-btn.edit-btn {
+  background: rgba(160,120,255,0.12);
+  border-color: rgba(160,120,255,0.35);
+  color: var(--accent-light);
+}
+.tts-btn:disabled { opacity: .45; cursor: not-allowed; }
+.edit-msg { font-size: 12px; color: var(--success); }
+
+/* 修正モード */
+.editor {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(160,120,255,0.3);
+  border-radius: 16px;
+  padding: 14px;
+}
+.edit-hint { font-size: 11px; color: var(--dim); line-height: 1.7; margin-bottom: 10px; }
+.sp-legend { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+.sp-chip {
+  font-size: 11px; padding: 2px 9px; border-radius: 12px;
+  border: 1px solid var(--sp-color, #a090cc); color: var(--sp-color, #a090cc);
+  background: rgba(0,0,0,0.2);
+}
+.edit-row {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 10px 10px 10px 12px;
+  border-left: 4px solid var(--sp-color, #a090cc);
+  background: rgba(255,255,255,0.03);
+  border-radius: 0 10px 10px 0;
+  margin-bottom: 8px;
+}
+.edit-row-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.edit-num { font-size: 11px; color: var(--dim); min-width: 18px; text-align: right; }
+.edit-row select.sp-select {
+  width: auto; flex: 1; min-width: 140px;
+  padding: 6px 10px; font-size: 13px; font-weight: 700;
+  color: var(--sp-color, #a090cc);
+  border-color: var(--sp-color, #a090cc);
+  background: rgba(0,0,0,0.25);
+}
+.edit-row textarea {
+  padding: 8px 10px; font-size: 14.5px; line-height: 1.7;
+  resize: none; overflow: hidden; min-height: 44px;
+  border-color: rgba(255,255,255,0.12);
+}
+.edit-row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.mini-btn {
+  background: rgba(255,255,255,0.05); border: 1px solid var(--border);
+  border-radius: 8px; padding: 4px 10px; color: var(--muted);
+  font-size: 12px; cursor: pointer; white-space: nowrap;
+}
+.mini-btn.danger { color: var(--danger); border-color: rgba(255,107,138,0.35); }
+.editor .btn-row .btn { font-size: 14px; padding: 12px 8px; white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -345,13 +411,21 @@ input::placeholder, textarea::placeholder { color: var(--dim); }
     <div class="input-wrap">
       <div class="section-title">世界観</div>
       <div class="worlds" id="worlds"></div>
-      <input type="text" id="custom-world" placeholder="例：マインクラフト風の世界" style="margin-top:10px;display:none">
       <button class="add-btn" id="random-story-btn" style="margin-top:10px;border-color:rgba(160,120,255,0.5);color:var(--accent-light);display:none">🎲 物語まるごとAIにおまかせ</button>
     </div>
 
     <div class="input-wrap">
       <div class="section-title">テーマ・要素（任意）</div>
-      <input type="text" id="theme" placeholder="例：ドラゴンと友達になる、迷子になって帰れた">
+      <textarea id="theme" rows="5" placeholder="例：ドラゴンと友達になる、迷子になって帰れた
+
+細かい設定もここに書けます：
+・世界観：マインクラフト風の世界（オリジナルを選んだとき）
+・たろうは怖がりだけど、最後に勇気を出す
+・おわりはみんなで星を見る場面にする"></textarea>
+      <div class="field-hint">
+        💡 世界観で「✏️ オリジナル」を選んだときは、ここに世界観も書いてください。<br>
+        登場人物の性格・入れたい場面・展開・口調など、細かい指示もまとめて書けます（すべて物語に反映されます）。
+      </div>
     </div>
 
     <div class="input-wrap">
@@ -378,10 +452,17 @@ input::placeholder, textarea::placeholder { color: var(--dim); }
       <div class="story-title">
         <h2 id="story-title-text"></h2>
       </div>
+      <div class="story-toolbar">
+        <button class="tts-btn speak-toggle" data-ctx="main" id="speak-btn-top">🔊 よみあげ</button>
+        <button class="tts-btn edit-btn" data-ctx="main">✏️ 修正</button>
+        <span class="edit-msg" data-ctx="main" style="display:none">✅ 修正を保存しました</span>
+      </div>
       <div class="story-box" id="story-body"></div>
+      <div class="editor" id="story-editor" style="display:none"></div>
 
       <div class="tts-controls">
-        <button class="tts-btn" id="speak-btn">🔊 よみあげ</button>
+        <button class="tts-btn speak-toggle" data-ctx="main" id="speak-btn">🔊 よみあげ</button>
+        <button class="tts-btn edit-btn" data-ctx="main">✏️ 修正</button>
         <button class="tts-btn" id="cast-voice-btn" style="display:none">🎭 声を割り当てる</button>
         <div class="tts-row">
           <span>速さ</span>
@@ -577,7 +658,7 @@ input::placeholder, textarea::placeholder { color: var(--dim); }
     </div>
 
     <div style="text-align:center;color:var(--dim);font-size:11px;margin-top:32px">
-      よみきかせの星 v1.2（マルチエンジン同時対応）<br>
+      よみきかせの星 v1.3（修正モード・話者の色分け対応）<br>
       作：しょーたろー
     </div>
   </div>
@@ -611,9 +692,16 @@ input::placeholder, textarea::placeholder { color: var(--dim); }
       </div>
       <button class="close-btn" id="modal-close">✕</button>
     </div>
+    <div class="story-toolbar">
+      <button class="tts-btn speak-toggle" data-ctx="modal" id="modal-speak-top">🔊 よみあげ</button>
+      <button class="tts-btn edit-btn" data-ctx="modal">✏️ 修正</button>
+      <span class="edit-msg" data-ctx="modal" style="display:none">✅ 修正を保存しました</span>
+    </div>
     <div class="story-box" id="modal-body"></div>
+    <div class="editor" id="modal-editor" style="display:none"></div>
     <div class="tts-controls">
-      <button class="tts-btn" id="modal-speak">🔊 よみあげ</button>
+      <button class="tts-btn speak-toggle" data-ctx="modal" id="modal-speak">🔊 よみあげ</button>
+      <button class="tts-btn edit-btn" data-ctx="modal">✏️ 修正</button>
     </div>
     <div id="modal-audio-status" style="margin-top:8px"></div>
     <div style="text-align:right;margin-top:12px">
@@ -739,7 +827,6 @@ let state = {
   // voice/gender/ageBandは選択時に決まる（声が先）。name/traitsは物語生成時にAIが決める。
   randomCasts: [],
   world: 'dragonquest',
-  customWorld: '',
   theme: '',
   length: appStore.getItem('yk_length') || 'mid',
   story: null,
@@ -939,7 +1026,6 @@ function renderWorlds() {
     d.addEventListener('click', () => {
       state.world = w.id;
       renderWorlds();
-      document.getElementById('custom-world').style.display = w.id === 'custom' ? 'block' : 'none';
       const rb = document.getElementById('random-story-btn');
       if (rb) rb.style.display = w.id === 'custom' ? 'inline-block' : 'none';
     });
@@ -947,9 +1033,6 @@ function renderWorlds() {
   });
 }
 
-document.getElementById('custom-world').addEventListener('input', e => {
-  state.customWorld = e.target.value;
-});
 document.getElementById('theme').addEventListener('input', e => {
   state.theme = e.target.value;
 });
@@ -1005,7 +1088,7 @@ async function generateStory(opts = {}) {
     const pick = RANDOM_WORLD_HINTS[Math.floor(Math.random() * RANDOM_WORLD_HINTS.length)];
     worldLabel = pick + '（AIが詳細を決める）';
   } else {
-    worldLabel = state.world === 'custom' ? state.customWorld : WORLDS.find(w => w.id === state.world).label;
+    worldLabel = state.world === 'custom' ? 'オリジナル' : WORLDS.find(w => w.id === state.world).label;
   }
   const mainChild = valid.find(m => m.role.startsWith('child'))?.name || valid[0]?.name || '主人公';
   const castLines = valid.map(m => {
@@ -1089,6 +1172,19 @@ ${valid.length === 0 ? '主人公の名前もあなたが決めて、世界観�
 意外性・想像力のある物語にしてください。同じ題材の繰り返しは避け、毎回新鮮な展開を。今回のトーン「${pickedTone.name}」に沿って自由に書いて構いません。
 ` : '';
 
+  // 世界観：オリジナル選択時は「テーマ・要素」欄の指定に従わせる（専用の入力欄は無い）
+  const worldPrompt = (state.world === 'custom' && !opts.randomFullStory)
+    ? 'オリジナル（下の【テーマ・要素・細かい設定】に世界観の指定があればそれに従う。無ければテーマに合う世界観をあなたが自由に設定する）'
+    : worldLabel;
+  // テーマ・要素欄：複数行の細かい指示も、そのまま「必ず反映する指定」として渡す
+  const themeText = (state.theme || '').trim();
+  const themeBlock = themeText
+    ? `（ユーザーからの指定。ここに書かれた内容はすべて必ず物語に反映すること）
+---
+${themeText}
+---`
+    : '（自由）今回のトーンに合った題材を選ぶ';
+
   const prompt = `あなたは物語の名手です。${lenCfg.mins}（${lenCfg.range}）の読み聞かせ向け物語を作ってください。
 
 【今回のトーン】${pickedTone.name}
@@ -1115,17 +1211,21 @@ ${pickedTone.desc}
 - 1行=1話者。話者が変わるたびに必ず改行
 - キャラ名は登場人物リストの名前と完全一致させる（架空キャラはあなたが命名）
 - **登場人物リストに記載された全員を、最低1回はセリフ（[キャラ名]「...」形式）で登場させること**。地の文で名前を出すだけでは不可。
+- **「」で囲まれたセリフは、必ずそのセリフを言うキャラの行（[キャラ名]「...」）に書く**。[ナレーター]の行の中に「」のセリフを混ぜない。地の文とセリフが続く場合は必ず行を分ける。
 - 感情タグは [tag] 形式のみ使用。**[/tag] のような閉じタグは絶対に書かない**（感情は次のタグまで継続する仕様）
 ${emotionTagGuide}
 ${randomCastInstruction}
 ${randomStoryInstruction}
 
-【世界観】${worldLabel}
-【テーマ・要素】${state.theme || '（自由）今回のトーンに合った題材を選ぶ'}
+【世界観】${worldPrompt}
+【テーマ・要素・細かい設定】${themeBlock}
 ${valid.length > 0 ? `【実在の登場人物】（全員を必ずセリフ付きで登場させる）\n${castLines}` : ''}
 
 タイトルと本文だけ出力。余計な前置き・解説は一切不要。`;
 
+  // 修正モード中なら閉じてから生成（表示が隠れたままにならないように）
+  if (isEditing('main')) closeEditor('main');
+  setEditButtonsDisabled('main', true);
   // Show progressive UI immediately so user sees streaming output
   document.getElementById('story-title-text').textContent = '📖 生成中...';
   document.getElementById('story-body').textContent = '';
@@ -1418,6 +1518,7 @@ ${result}
     btn.disabled = false;
     regenBtn.disabled = false;
     btn.innerHTML = '🌟 物語をつくる';
+    setEditButtonsDisabled('main', false);
   }
 }
 
@@ -1917,6 +2018,8 @@ document.getElementById('voice-modal-bg').addEventListener('click', (e) => {
 // =========================== Save / History ===========================
 document.getElementById('save-btn').addEventListener('click', () => {
   if (!state.story) return;
+  // 同じ物語（修正後の再保存など）は重複させず上書き
+  state.history = state.history.filter(s => s.id !== state.story.id);
   state.history.unshift(state.story);
   state.history = state.history.slice(0, 200);
   appStore.setItem('yk_history', JSON.stringify(state.history));
@@ -1953,6 +2056,8 @@ function renderHistory() {
 function openModal(s) {
   // 別の物語を開くときに再生中なら止める（再生対象の取り違え・ダブり防止）
   if (state.speaking) stopSpeak();
+  // 前の物語を修正中のまま開いたら、修正モードは破棄して通常表示に戻す
+  if (isEditing('modal')) closeEditor('modal');
   document.getElementById('modal-title').textContent = '📖 ' + s.title;
   document.getElementById('modal-meta').innerHTML =
     `<span class="badge">${escapeHtml(s.world)}</span>` +
@@ -1967,17 +2072,331 @@ document.getElementById('modal-bg').addEventListener('click', e => {
   if (e.target.id === 'modal-bg') closeModal();
 });
 function closeModal() {
+  if (isEditing('modal')) {
+    if (isEditorDirty('modal') && !confirm('修正中の内容はまだ保存されていません。閉じますか？')) return;
+    closeEditor('modal');
+  }
   if (state.speaking) stopSpeak();
   document.getElementById('modal-bg').style.display = 'none';
 }
 document.getElementById('modal-delete').addEventListener('click', () => {
   const id = document.getElementById('modal-bg').dataset.storyId;
   if (!confirm('この物語を削除しますか？')) return;
+  if (isEditing('modal')) closeEditor('modal');
   state.history = state.history.filter(s => s.id !== id);
   appStore.setItem('yk_history', JSON.stringify(state.history));
   AudioStore.del(id).catch(() => {}); // 保存音声も一緒に削除
   closeModal();
   renderHistory();
+});
+
+// =========================== 修正モード（文章・話者の編集） ===========================
+// 物語を「1行＝1話者」のセグメント単位で編集する。
+// ・各行の話者（ナレーター／キャラ名）をプルダウンで変更できる
+// ・文章はそのまま書き直せる。行の分割・追加・削除も可能
+// ・話者ごとに色分けして、誰のセリフか一目で分かるようにする
+// ・保存すると rawBody（話者タグ付き＝音声用）と body（表示用）を作り直し、履歴にも反映する
+const SPEAKER_PALETTE = ['#fbbf24', '#34d399', '#f472b6', '#60a5fa', '#fb923c', '#a3e635', '#22d3ee', '#c084fc', '#f87171', '#e879f9'];
+const NARRATOR_COLOR = '#a090cc';
+const editors = {}; // ctx('main'|'modal') → { story, segs, speakers, colors, orig }
+
+function editorEls(ctx) {
+  return ctx === 'modal'
+    ? { body: document.getElementById('modal-body'), editor: document.getElementById('modal-editor') }
+    : { body: document.getElementById('story-body'), editor: document.getElementById('story-editor') };
+}
+function isEditing(ctx) { return !!editors[ctx]; }
+function isEditorDirty(ctx) {
+  const ed = editors[ctx];
+  return !!ed && JSON.stringify(ed.segs) !== ed.orig;
+}
+
+// getStorySpeakers は state.story を見るので、対象の物語に一時的に差し替えて呼ぶ
+function speakersForStory(story) {
+  const prev = state.story;
+  state.story = story;
+  try { return getStorySpeakers(); } finally { state.story = prev; }
+}
+
+function makeSpeakerColorMap(speakers) {
+  const map = { 'ナレーター': NARRATOR_COLOR };
+  let i = 0;
+  speakers.forEach(sp => {
+    if (sp !== 'ナレーター' && !map[sp]) map[sp] = SPEAKER_PALETTE[i++ % SPEAKER_PALETTE.length];
+  });
+  return map;
+}
+function speakerColor(ctx, speaker) {
+  const ed = editors[ctx];
+  return (ed && ed.colors[speaker]) || NARRATOR_COLOR;
+}
+
+// 物語 → 編集用セグメント配列。話者タグが無い物語は行ごとにナレーターとして扱う
+function storyToEditSegments(story) {
+  const src = story.rawBody || story.body || '';
+  let segs = parseSpeakerSegments(src);
+  if (segs.length === 0) {
+    segs = src.split('\n').map(l => l.trim()).filter(Boolean).map(t => ({ speaker: 'ナレーター', text: t }));
+  }
+  return segs.map(s => ({ speaker: s.speaker, text: s.text }));
+}
+
+// 編集用セグメント配列 → rawBody（話者タグ付き）と body（表示用）
+function editSegmentsToStory(segs) {
+  const clean = segs
+    .map(s => ({ speaker: ((s.speaker || '').trim() || 'ナレーター'), text: (s.text || '').trim() }))
+    .filter(s => s.text);
+  return {
+    rawBody: clean.map(s => `[${s.speaker}]${s.text}`).join('\n'),
+    body: clean.map(s => stripEmotionTags(s.text)).join('\n'),
+  };
+}
+
+function setEditButtons(ctx, editing) {
+  document.querySelectorAll(`.edit-btn[data-ctx="${ctx}"]`).forEach(b => {
+    b.textContent = editing ? '✕ 修正をやめる' : '✏️ 修正';
+  });
+}
+function setEditButtonsDisabled(ctx, disabled) {
+  document.querySelectorAll(`.edit-btn[data-ctx="${ctx}"]`).forEach(b => { b.disabled = disabled; });
+}
+
+function openEditor(ctx) {
+  const story = storyForCtx(ctx);
+  if (!story) return;
+  const segs = storyToEditSegments(story);
+  const speakers = speakersForStory(story);
+  segs.forEach(s => { if (!speakers.includes(s.speaker)) speakers.push(s.speaker); });
+  editors[ctx] = { story, segs, speakers, colors: makeSpeakerColorMap(speakers), orig: JSON.stringify(segs) };
+  const { body, editor } = editorEls(ctx);
+  body.style.display = 'none';
+  editor.style.display = 'block';
+  renderEditor(ctx);
+  setEditButtons(ctx, true);
+}
+
+function closeEditor(ctx) {
+  delete editors[ctx];
+  const { body, editor } = editorEls(ctx);
+  editor.style.display = 'none';
+  editor.innerHTML = '';
+  body.style.display = 'block';
+  setEditButtons(ctx, false);
+}
+
+function miniBtn(label, onClick, cls) {
+  const b = document.createElement('button');
+  b.className = 'mini-btn' + (cls ? ' ' + cls : '');
+  b.textContent = label;
+  b.addEventListener('click', onClick);
+  return b;
+}
+
+function renderEditor(ctx, focusIndex) {
+  const ed = editors[ctx];
+  if (!ed) return;
+  const { editor } = editorEls(ctx);
+  editor.innerHTML = '';
+
+  const hint = document.createElement('div');
+  hint.className = 'edit-hint';
+  hint.innerHTML =
+    '各行の名前で「だれがしゃべるか」を変えられます。文章もそのまま書き直せます。<br>' +
+    'ナレーターの行にセリフが混ざっているときは、分けたい位置を文章の中でタップしてから「✂ ここで分割」を押し、分かれた行の話者を変えてください。<br>' +
+    '<span style="opacity:.8">※ [happy] のような英語のタグは音声用の感情指定です。残しても消してもかまいません。</span>';
+  editor.appendChild(hint);
+
+  const legend = document.createElement('div');
+  legend.className = 'sp-legend';
+  ed.speakers.forEach(sp => {
+    const c = document.createElement('span');
+    c.className = 'sp-chip';
+    c.style.setProperty('--sp-color', speakerColor(ctx, sp));
+    c.textContent = (sp === 'ナレーター' ? '📖 ' : '💬 ') + sp;
+    legend.appendChild(c);
+  });
+  editor.appendChild(legend);
+
+  const list = document.createElement('div');
+  ed.segs.forEach((seg, idx) => list.appendChild(renderEditRow(ctx, seg, idx)));
+  editor.appendChild(list);
+
+  const addWrap = document.createElement('div');
+  addWrap.style.cssText = 'margin:4px 0 14px';
+  addWrap.appendChild(miniBtn('＋ 最後に行を追加', () => {
+    ed.segs.push({ speaker: 'ナレーター', text: '' });
+    renderEditor(ctx, ed.segs.length - 1);
+  }));
+  editor.appendChild(addWrap);
+
+  const footer = document.createElement('div');
+  footer.className = 'btn-row';
+  footer.style.marginTop = '0';
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn btn-secondary';
+  cancelBtn.textContent = '✕ キャンセル';
+  cancelBtn.addEventListener('click', () => cancelEditor(ctx));
+  const saveBtn = document.createElement('button');
+  saveBtn.className = 'btn';
+  saveBtn.textContent = '✅ 修正を保存';
+  saveBtn.addEventListener('click', () => saveEditor(ctx));
+  footer.appendChild(cancelBtn);
+  footer.appendChild(saveBtn);
+  editor.appendChild(footer);
+
+  if (focusIndex !== undefined) {
+    const ta = editor.querySelectorAll('textarea')[focusIndex];
+    if (ta) { ta.focus(); try { ta.setSelectionRange(0, 0); } catch (_) {} }
+  }
+}
+
+function renderEditRow(ctx, seg, idx) {
+  const ed = editors[ctx];
+  const row = document.createElement('div');
+  row.className = 'edit-row';
+  row.style.setProperty('--sp-color', speakerColor(ctx, seg.speaker));
+
+  const head = document.createElement('div');
+  head.className = 'edit-row-head';
+  const num = document.createElement('span');
+  num.className = 'edit-num';
+  num.textContent = String(idx + 1);
+  const sel = document.createElement('select');
+  sel.className = 'sp-select';
+  ed.speakers.forEach(sp => {
+    const o = document.createElement('option');
+    o.value = sp;
+    o.textContent = (sp === 'ナレーター' ? '📖 ' : '💬 ') + sp;
+    sel.appendChild(o);
+  });
+  const newOpt = document.createElement('option');
+  newOpt.value = '__new__';
+  newOpt.textContent = '＋ 新しい話者を追加…';
+  sel.appendChild(newOpt);
+  sel.value = seg.speaker;
+  sel.addEventListener('change', () => {
+    if (sel.value === '__new__') {
+      const name = (prompt('新しい話者の名前を入力してください（例：たろう）') || '').trim().replace(/[\[\]]/g, '');
+      if (!name) { sel.value = seg.speaker; return; }
+      if (!ed.speakers.includes(name)) {
+        ed.speakers.push(name);
+        ed.colors = makeSpeakerColorMap(ed.speakers);
+      }
+      seg.speaker = name;
+      renderEditor(ctx); // 全行のプルダウンに新しい話者を反映
+      return;
+    }
+    seg.speaker = sel.value;
+    row.style.setProperty('--sp-color', speakerColor(ctx, seg.speaker));
+  });
+  head.appendChild(num);
+  head.appendChild(sel);
+  row.appendChild(head);
+
+  const ta = document.createElement('textarea');
+  ta.value = seg.text;
+  ta.rows = 1;
+  ta.placeholder = '文章を入力…';
+  const autosize = () => { ta.style.height = 'auto'; ta.style.height = (ta.scrollHeight + 2) + 'px'; };
+  ta.addEventListener('input', () => { seg.text = ta.value; autosize(); });
+  requestAnimationFrame(autosize);
+  row.appendChild(ta);
+
+  const actions = document.createElement('div');
+  actions.className = 'edit-row-actions';
+  actions.appendChild(miniBtn('✂ ここで分割', () => {
+    const t = ta.value;
+    const pos = ta.selectionStart;
+    const before = (pos > 0 ? t.slice(0, pos) : '').trim();
+    const after = (pos > 0 ? t.slice(pos) : '').trim();
+    if (!before || !after) {
+      alert('分けたい位置を文章の中でタップ（カーソルを置く）してから押してください');
+      return;
+    }
+    seg.text = before;
+    ed.segs.splice(idx + 1, 0, { speaker: seg.speaker, text: after });
+    renderEditor(ctx, idx + 1);
+  }));
+  actions.appendChild(miniBtn('＋ 下に行を追加', () => {
+    ed.segs.splice(idx + 1, 0, { speaker: 'ナレーター', text: '' });
+    renderEditor(ctx, idx + 1);
+  }));
+  actions.appendChild(miniBtn('🗑 削除', () => {
+    if (ed.segs.length <= 1) { alert('最後の1行は削除できません'); return; }
+    if (seg.text.trim() && !confirm('この行を削除しますか？')) return;
+    ed.segs.splice(idx, 1);
+    renderEditor(ctx);
+  }, 'danger'));
+  row.appendChild(actions);
+  return row;
+}
+
+function cancelEditor(ctx) {
+  if (isEditorDirty(ctx) && !confirm('修正した内容を破棄しますか？')) return;
+  closeEditor(ctx);
+}
+
+function updateCastVoiceBtn(story) {
+  const castVoiceBtn = document.getElementById('cast-voice-btn');
+  if (!castVoiceBtn) return;
+  const segments = parseSpeakerSegments((story && story.rawBody) || '');
+  castVoiceBtn.style.display = segments.some(s => s.speaker !== 'ナレーター') ? 'inline-flex' : 'none';
+}
+
+function showEditSavedMsg(ctx) {
+  document.querySelectorAll(`.edit-msg[data-ctx="${ctx}"]`).forEach(el => {
+    el.style.display = 'inline';
+    setTimeout(() => { el.style.display = 'none'; }, 3000);
+  });
+}
+
+function saveEditor(ctx) {
+  const ed = editors[ctx];
+  if (!ed) return;
+  const { rawBody, body } = editSegmentsToStory(ed.segs);
+  if (!body) { alert('文章が空です。1行以上入力してください'); return; }
+  if (state.speaking) stopSpeak();
+
+  const story = ed.story;
+  story.rawBody = rawBody;
+  story.body = body;
+  story.editedAt = Date.now(); // 保存済み音声より新しければ「音声は修正前」と判定するため
+
+  // 履歴に入っている物語なら、そこも更新して保存
+  const hIdx = state.history.findIndex(s => s.id === story.id);
+  if (hIdx >= 0) {
+    state.history[hIdx] = story;
+    appStore.setItem('yk_history', JSON.stringify(state.history));
+  } else if (ctx === 'main') {
+    // まだ履歴に無い → 「💾 保存」を押してもらう必要があるので保存済み表示は消す
+    document.getElementById('save-msg').style.display = 'none';
+  }
+  closeEditor(ctx);
+
+  // メイン画面に同じ物語が出ていれば更新
+  if (state.story && state.story.id === story.id) {
+    state.story = story;
+    document.getElementById('story-body').textContent = story.body;
+    refreshAudioStatus(story, 'audio-status', 'main');
+    updateCastVoiceBtn(story);
+  }
+  // 履歴モーダルに同じ物語が出ていれば更新
+  const modalBg = document.getElementById('modal-bg');
+  if (modalBg.style.display !== 'none' && modalBg.dataset.storyId === story.id) {
+    document.getElementById('modal-body').textContent = story.body;
+    refreshAudioStatus(story, 'modal-audio-status', 'modal');
+  }
+  if (hIdx >= 0) renderHistory(); // 一覧のプレビュー文も更新
+  showEditSavedMsg(ctx);
+}
+
+// 修正ボタン（上下どちらも）：修正モードの開始／中止をトグル
+document.querySelectorAll('.edit-btn').forEach(b => {
+  b.addEventListener('click', () => {
+    const ctx = b.dataset.ctx || 'main';
+    if (isEditing(ctx)) cancelEditor(ctx);
+    else openEditor(ctx);
+  });
 });
 
 // =========================== TTS ===========================
@@ -2116,10 +2535,7 @@ async function speakMultiEngine(plan, myToken) {
   if (myToken === undefined) myToken = ++state.playToken;
   // このループが今も最新の再生セッションか？ 違えば即停止する
   const isCurrent = () => state.speaking && state.playToken === myToken;
-  const btn = document.getElementById('speak-btn');
-  const modalBtn = document.getElementById('modal-speak');
-  btn.textContent = '⏳ 音声生成中...';
-  modalBtn.textContent = '⏳ 音声生成中...';
+  setSpeakBtnsText('⏳ 音声生成中...');
   state.speaking = true;
 
   // ログ：コンソール + 画面下の小さなステータス欄に表示（iOSでも原因が見える）
@@ -2461,10 +2877,7 @@ async function synthElevenLabsToBlobUrl(text, voiceId) {
 
 // Fish Audio単独モード（タグ付き原文で全文読ませる）
 async function speakFishAudioSingle(text, voiceId) {
-  const btn = document.getElementById('speak-btn');
-  const modalBtn = document.getElementById('modal-speak');
-  btn.textContent = '⏳ 音声生成中...';
-  modalBtn.textContent = '⏳ 音声生成中...';
+  setSpeakBtnsText('⏳ 音声生成中...');
   state.speaking = true;
   try {
     // タグ付き原文を渡す（Fish Audioが感情を解釈）
@@ -2488,10 +2901,7 @@ async function speakFishAudioSingle(text, voiceId) {
 
 // Aivis Cloud単独モード（感情タグは非対応なので除去して読ませる）
 async function speakAivisSingle(text, modelUuid) {
-  const btn = document.getElementById('speak-btn');
-  const modalBtn = document.getElementById('modal-speak');
-  btn.textContent = '⏳ 音声生成中...';
-  modalBtn.textContent = '⏳ 音声生成中...';
+  setSpeakBtnsText('⏳ 音声生成中...');
   state.speaking = true;
   try {
     // 話者タグ・感情タグは除去してプレーンテキストで渡す
@@ -2545,10 +2955,7 @@ async function playSequentialBase64(audioBase64List, mimeType) {
 
 // Multi-voice Google TTS playback
 async function speakGoogleMulti(plan) {
-  const btn = document.getElementById('speak-btn');
-  const modalBtn = document.getElementById('modal-speak');
-  btn.textContent = '⏳ 音声生成中...';
-  modalBtn.textContent = '⏳ 音声生成中...';
+  setSpeakBtnsText('⏳ 音声生成中...');
   state.speaking = true;
   try {
     // For each plan segment, split into <=4000B chunks (rare for short lines) and generate
@@ -2660,10 +3067,7 @@ async function playSequentialUrls(urls) {
 
 // Multi-voice ElevenLabs playback
 async function speakElevenLabsMulti(plan) {
-  const btn = document.getElementById('speak-btn');
-  const modalBtn = document.getElementById('modal-speak');
-  btn.textContent = '⏳ 音声生成中...';
-  modalBtn.textContent = '⏳ 音声生成中...';
+  setSpeakBtnsText('⏳ 音声生成中...');
   state.speaking = true;
   try {
     const audioBlobs = await Promise.all(plan.map(async (seg, i) => {
@@ -2735,10 +3139,7 @@ function splitTextForTTS(text, maxBytes) {
 }
 
 async function speakGoogle(text) {
-  const btn = document.getElementById('speak-btn');
-  const modalBtn = document.getElementById('modal-speak');
-  btn.textContent = '⏳ 音声生成中...';
-  modalBtn.textContent = '⏳ 音声生成中...';
+  setSpeakBtnsText('⏳ 音声生成中...');
   state.speaking = true;
 
   // Google TTS limit is 5000 bytes. Use 4000 to leave headroom.
@@ -2880,10 +3281,7 @@ function speakBrowser(text) {
 }
 
 async function speakElevenLabs(text) {
-  const btn = document.getElementById('speak-btn');
-  const modalBtn = document.getElementById('modal-speak');
-  btn.textContent = '⏳ 音声生成中...';
-  modalBtn.textContent = '⏳ 音声生成中...';
+  setSpeakBtnsText('⏳ 音声生成中...');
   state.speaking = true;
 
   // iOS Safari対策：ユーザータップの直後にAudio要素を作っておく
@@ -2946,24 +3344,30 @@ function stopSpeak() {
   if (statusEl) statusEl.style.display = 'none';
   updateSpeakBtns();
 }
-function updateSpeakBtns() {
-  const label = state.speaking ? '⏹ 止める' : '🔊 よみあげ';
-  document.getElementById('speak-btn').textContent = label;
-  document.getElementById('modal-speak').textContent = label;
+// よみあげボタンは物語の上と下、メイン画面と履歴モーダルの計4つ。全部同じ表示にそろえる
+function setSpeakBtnsText(label) {
+  document.querySelectorAll('.speak-toggle').forEach(b => { b.textContent = label; });
 }
-document.getElementById('speak-btn').addEventListener('click', () => {
+function updateSpeakBtns() {
+  setSpeakBtnsText(state.speaking ? '⏹ 止める' : '🔊 よみあげ');
+}
+function handleSpeakToggle(ctx) {
   // 再生中に押したら止めるだけ（トグル）。停止中なら再生開始。
   if (state.speaking) { stopSpeak(); return; }
-  if (state.story) speak(state.story.body);
-});
-document.getElementById('modal-speak').addEventListener('click', () => {
-  if (state.speaking) { stopSpeak(); return; }
-  const id = document.getElementById('modal-bg').dataset.storyId;
-  const s = state.history.find(x => x.id === id);
-  if (s) {
-    // state.story をグローバルにすり替えず、再生対象として引数で渡す（ダブり再生防止）
-    speak(s.body, s);
+  if (isEditing(ctx)) {
+    alert('修正中です。「✅ 修正を保存」または「キャンセル」をしてからよみあげてください');
+    return;
   }
+  if (ctx === 'modal') {
+    const s = storyForCtx('modal');
+    // state.story をグローバルにすり替えず、再生対象として引数で渡す（ダブり再生防止）
+    if (s) speak(s.body, s);
+  } else if (state.story) {
+    speak(state.story.body);
+  }
+}
+document.querySelectorAll('.speak-toggle').forEach(b => {
+  b.addEventListener('click', () => handleSpeakToggle(b.dataset.ctx || 'main'));
 });
 
 // =========================== Settings ===========================
@@ -3872,6 +4276,8 @@ async function playSavedAudio(story) {
   let rec = null;
   try { rec = await AudioStore.get(story.id); } catch (_) { return false; }
   if (!rec || !rec.blob) return false;
+  // 文章を修正した後は、修正前に作った音声は使わず新しく生成する
+  if (isAudioStale(story, rec)) return false;
   const el = document.getElementById('file-player');
   if (!el) return false;
 
@@ -3913,6 +4319,11 @@ function setupMediaSession(story, el) {
   } catch (_) {}
 }
 
+// 保存済み音声が「文章の修正より前」に作られたものか
+function isAudioStale(story, rec) {
+  return !!(story && story.editedAt && rec && rec.createdAt && story.editedAt > rec.createdAt);
+}
+
 // --- 音声ステータス欄のUI ---
 async function refreshAudioStatus(story, elId, ctx) {
   const el = document.getElementById(elId);
@@ -3924,11 +4335,18 @@ async function refreshAudioStatus(story, elId, ctx) {
     el.innerHTML = '<button class="tts-btn" data-yk-act="export" data-yk-ctx="' + ctx +
       '" style="width:100%">💾 音声を保存（次回から無料・画面を消してもOK）</button>';
   } else {
+    const size = fmtBytes(rec.bytes || rec.blob.size);
+    const statusHtml = isAudioStale(story, rec)
+      ? '<div style="font-size:12px;color:var(--gold);background:rgba(255,191,36,0.08);border:1px solid rgba(255,191,36,0.3);border-radius:8px;padding:8px 10px;line-height:1.6">' +
+        '⚠ 文章を修正したため、保存済みの音声（' + size + '）は修正前の内容です。<br>' +
+        'よみあげは新しく音声を作ります（クレジット消費）。「🔁 音声を作り直す」で保存し直せます' +
+        '</div>'
+      : '<div style="font-size:12px;color:var(--dim);background:rgba(0,0,0,0.25);border-radius:8px;padding:8px 10px">' +
+        '✅ 音声を保存済み（' + size + '）<br>' +
+        'よみあげはこの音声を使うのでクレジットを消費しません' +
+        '</div>';
     el.innerHTML =
-      '<div style="font-size:12px;color:var(--dim);background:rgba(0,0,0,0.25);border-radius:8px;padding:8px 10px">' +
-      '✅ 音声を保存済み（' + fmtBytes(rec.bytes || rec.blob.size) + '）<br>' +
-      'よみあげはこの音声を使うのでクレジットを消費しません' +
-      '</div>' +
+      statusHtml +
       '<div style="display:flex;gap:8px;margin-top:8px">' +
       '<button class="tts-btn" data-yk-act="download" data-yk-ctx="' + ctx + '" style="flex:1;font-size:13px">⬇️ ファイルを取り出す</button>' +
       '<button class="tts-btn" data-yk-act="delete-audio" data-yk-ctx="' + ctx + '" style="flex:1;font-size:13px">🗑 音声を消す</button>' +
