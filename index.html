@@ -366,6 +366,21 @@ textarea#theme {
 }
 .mini-btn.danger { color: var(--danger); border-color: rgba(255,107,138,0.35); }
 .editor .btn-row .btn { font-size: 14px; padding: 12px 8px; white-space: nowrap; }
+
+/* 修正モード：複数人が同時にしゃべる行の設定パネル */
+.multi-panel {
+  display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center;
+  font-size: 12px; color: var(--muted);
+  background: rgba(0,0,0,0.2); border-radius: 8px; padding: 8px 10px;
+}
+.multi-panel label { display: flex; align-items: center; gap: 4px; cursor: pointer; white-space: nowrap; }
+.multi-panel input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
+
+/* バックアップ */
+.backup-note { font-size: 12px; color: var(--dim); line-height: 1.6; margin-bottom: 10px; }
+.backup-note b { color: var(--gold); }
+.check-row { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-bottom: 10px; cursor: pointer; }
+.check-row input[type="checkbox"] { width: 18px; height: 18px; margin: 0; }
 </style>
 </head>
 <body>
@@ -658,11 +673,26 @@ textarea#theme {
 
     <div class="input-wrap">
       <div class="section-title">データ管理</div>
-      <button class="btn btn-secondary" id="clear-history-btn">📭 履歴を全削除</button>
+      <div class="backup-note">
+        履歴・設定・APIキーを1つのファイルに書き出して、機種変更やアプリの入れ直しのあとに読み込めます。<br>
+        iPhoneでは共有画面が開くので「"ファイル"に保存」を選んでください。<br>
+        <b>⚠ ファイルにはAPIキーが含まれます。他の人に渡さないでください。</b>
+      </div>
+      <label class="check-row">
+        <input type="checkbox" id="backup-include-audio" checked>
+        保存済みの音声も含める（ファイルが大きくなります）
+      </label>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <button class="btn btn-secondary" id="backup-export-btn">📤 バックアップを書き出す（保存する）</button>
+        <button class="btn btn-secondary" id="backup-import-btn">📥 バックアップを読み込む（復元する）</button>
+      </div>
+      <input type="file" id="backup-file" accept=".json,application/json" style="display:none">
+      <div id="backup-msg" style="font-size:12px;color:var(--success);margin-top:8px;line-height:1.6;display:none"></div>
+      <button class="btn btn-secondary" id="clear-history-btn" style="margin-top:14px">📭 履歴を全削除</button>
     </div>
 
     <div style="text-align:center;color:var(--dim);font-size:11px;margin-top:32px">
-      よみきかせの星 v1.3（修正モード・話者の色分け対応）<br>
+      よみきかせの星 v1.4（バックアップ・複数人同時セリフ対応）<br>
       作：しょーたろー
     </div>
   </div>
@@ -746,9 +776,15 @@ const appStore = (() => {
       getItem: (k) => (k in mem ? mem[k] : null),
       setItem: (k, v) => { mem[k] = String(v); },
       removeItem: (k) => { delete mem[k]; },
+      keys: () => Object.keys(mem),
     };
   }
 })();
+// 保存されている全キーを返す（localStorage でもメモリ保存でも動く）
+function appStoreKeys() {
+  try { if (appStore === localStorage) return Object.keys(localStorage); } catch (_) {}
+  return (appStore.keys && appStore.keys()) || [];
+}
 
 // =========================== Constants ===========================
 const WORLDS = [
@@ -1206,6 +1242,7 @@ ${pickedTone.desc}
 本文：
 [ナレーター]地の文はこの形式。
 [キャラ名]「セリフはこの形式」
+[キャラ名・キャラ名]「複数人が声をそろえて同時に言うセリフはこの形式」
 [ナレーター]次の地の文。
 ...
 
@@ -1216,6 +1253,7 @@ ${pickedTone.desc}
 - キャラ名は登場人物リストの名前と完全一致させる（架空キャラはあなたが命名）
 - **登場人物リストに記載された全員を、最低1回はセリフ（[キャラ名]「...」形式）で登場させること**。地の文で名前を出すだけでは不可。
 - **「」で囲まれたセリフは、必ずそのセリフを言うキャラの行（[キャラ名]「...」）に書く**。[ナレーター]の行の中に「」のセリフを混ぜない。地の文とセリフが続く場合は必ず行を分ける。
+- 複数人が声をそろえて同じセリフを同時に言う場面（「えー！」「やったー！」など）は、[たろう・はなこ]「えー！」のように名前を「・」でつなぐ。登場人物全員なら [みんな] でもよい。本当に同時に言う場面だけに使い、多用しない
 - 感情タグは [tag] 形式のみ使用。**[/tag] のような閉じタグは絶対に書かない**（感情は次のタグまで継続する仕様）
 ${emotionTagGuide}
 ${randomCastInstruction}
@@ -1468,7 +1506,7 @@ ${result}
       : stripEmotionTags(rawBody);
 
     // 物語に含まれる「ナレーター以外の話者名」を抽出 → 架空キャラ自動マッピング
-    const speakersInStory = [...new Set(segments.map(s => s.speaker).filter(s => s !== 'ナレーター'))];
+    const speakersInStory = [...new Set(segments.flatMap(s => splitSpeakers(s.speaker)).filter(s => s !== 'ナレーター' && !isAllSpeakersWord(s)))];
     const realNames = new Set(valid.map(m => m.name.trim()));
     const autoNamedRandomSpeakers = speakersInStory.filter(s => !realNames.has(s));
     // 架空キャラの命名された名前 ↔ 声 のマッピングを作成
@@ -1560,6 +1598,37 @@ function parseSpeakerSegments(body) {
   return segments.filter(s => s.text.length > 0);
 }
 
+// =========================== 複数人が同時にしゃべる話者タグ ===========================
+// [たろう・はなこ]「えー！」 のように名前を区切り文字でつなぐと、複数人が同時に言うセリフになる。
+// [みんな] / [全員] は、その物語に登場するナレーター以外の全員。
+const MULTI_SPEAKER_SEP = /[・＋+＆&、\/]/;
+const ALL_SPEAKER_WORDS = ['みんな', '全員', 'ぜんいん'];
+function isAllSpeakersWord(name) { return ALL_SPEAKER_WORDS.includes((name || '').trim()); }
+// タグを個々の名前に分解する（単独の話者なら1要素）
+function splitSpeakers(tag) {
+  const out = [];
+  String(tag || '').split(MULTI_SPEAKER_SEP).forEach(s => { s = s.trim(); if (s && !out.includes(s)) out.push(s); });
+  return out;
+}
+function isMultiSpeaker(tag) { return isAllSpeakersWord(tag) || splitSpeakers(tag).length > 1; }
+// 物語に登場する「ナレーター以外の個人」の一覧（本文の話者タグ・登録した登場人物・架空キャラ）
+function storyIndividualSpeakers(story) {
+  const set = new Set();
+  if (story && story.rawBody) {
+    parseSpeakerSegments(story.rawBody).forEach(s => {
+      splitSpeakers(s.speaker).forEach(n => { if (n !== 'ナレーター' && !isAllSpeakersWord(n)) set.add(n); });
+    });
+  }
+  if (story && story.members) story.members.filter(m => m.name && m.name.trim()).forEach(m => set.add(m.name.trim()));
+  if (story && story.randomCastNameMap) Object.keys(story.randomCastNameMap).forEach(n => set.add(n));
+  return Array.from(set);
+}
+// タグ → 実際にしゃべる人の配列（[みんな] は全員に展開）
+function expandSpeakers(tag, story) {
+  if (isAllSpeakersWord(tag)) return storyIndividualSpeakers(story || state.story);
+  return splitSpeakers(tag).filter(n => !isAllSpeakersWord(n));
+}
+
 // 話者タグかどうかの判定。感情タグ（英語の小文字単語列など）は話者として扱わない。
 function isSpeakerTag(tagContent) {
   const t = tagContent.trim();
@@ -1597,22 +1666,9 @@ function stripEmotionTags(text) {
 // Build a list of speakers from current story.
 // ナレーター + 物語本文に登場した話者 + 登録された登場人物全員 をマージする。
 // （AIが登場人物リストの一部を地の文でしか言及しなかった場合の取りこぼし防止）
+// 複数人同時のタグ（[たろう・はなこ]）は個人に分解して数える
 function getStorySpeakers() {
-  const speakers = new Set(['ナレーター']);
-  // 1. 物語本文の話者タグから拾う
-  if (state.story?.rawBody) {
-    const segments = parseSpeakerSegments(state.story.rawBody);
-    segments.forEach(s => speakers.add(s.speaker));
-  }
-  // 2. 登録された登場人物（state.story.members）全員も追加
-  if (state.story?.members) {
-    state.story.members.filter(m => m.name.trim()).forEach(m => speakers.add(m.name.trim()));
-  }
-  // 3. 架空キャラのAI命名（randomCastNameMap）も追加
-  if (state.story?.randomCastNameMap) {
-    Object.keys(state.story.randomCastNameMap).forEach(n => speakers.add(n));
-  }
-  return Array.from(speakers);
+  return ['ナレーター'].concat(storyIndividualSpeakers(state.story));
 }
 
 // 利用可能な全エンジンの声を統合して返す: [{id, label, engine}]
@@ -2130,9 +2186,16 @@ function makeSpeakerColorMap(speakers) {
   });
   return map;
 }
+const MULTI_COLOR = '#f1f5f9'; // 複数人が同時にしゃべる行
 function speakerColor(ctx, speaker) {
+  if (isMultiSpeaker(speaker)) return MULTI_COLOR;
   const ed = editors[ctx];
   return (ed && ed.colors[speaker]) || NARRATOR_COLOR;
+}
+function speakerLabel(sp) {
+  if (sp === 'ナレーター') return '📖 ' + sp;
+  if (isMultiSpeaker(sp)) return '👥 ' + sp;
+  return '💬 ' + sp;
 }
 
 // 物語 → 編集用セグメント配列。話者タグが無い物語は行ごとにナレーターとして扱う
@@ -2170,7 +2233,10 @@ function openEditor(ctx) {
   if (!story) return;
   const segs = storyToEditSegments(story);
   const speakers = speakersForStory(story);
-  segs.forEach(s => { if (!speakers.includes(s.speaker)) speakers.push(s.speaker); });
+  // 複数人同時のタグは個人に分解して候補に入れる
+  segs.forEach(s => {
+    splitSpeakers(s.speaker).forEach(n => { if (!isAllSpeakersWord(n) && !speakers.includes(n)) speakers.push(n); });
+  });
   editors[ctx] = { story, segs, speakers, colors: makeSpeakerColorMap(speakers), orig: JSON.stringify(segs) };
   const { body, editor } = editorEls(ctx);
   body.style.display = 'none';
@@ -2207,6 +2273,7 @@ function renderEditor(ctx, focusIndex) {
   hint.innerHTML =
     '各行の名前で「だれがしゃべるか」を変えられます。文章もそのまま書き直せます。<br>' +
     'ナレーターの行にセリフが混ざっているときは、分けたい位置を文章の中でタップしてから「✂ ここで分割」を押し、分かれた行の話者を変えてください。<br>' +
+    '「えー！」のように複数人が同時に言うセリフは、名前の欄で「👥 複数人が同時に…」を選んで人を選びます。<br>' +
     '<span style="opacity:.8">※ [happy] のような英語のタグは音声用の感情指定です。残しても消してもかまいません。</span>';
   editor.appendChild(hint);
 
@@ -2216,9 +2283,16 @@ function renderEditor(ctx, focusIndex) {
     const c = document.createElement('span');
     c.className = 'sp-chip';
     c.style.setProperty('--sp-color', speakerColor(ctx, sp));
-    c.textContent = (sp === 'ナレーター' ? '📖 ' : '💬 ') + sp;
+    c.textContent = speakerLabel(sp);
     legend.appendChild(c);
   });
+  if (ed.segs.some(s => isMultiSpeaker(s.speaker))) {
+    const c = document.createElement('span');
+    c.className = 'sp-chip';
+    c.style.setProperty('--sp-color', MULTI_COLOR);
+    c.textContent = '👥 複数人が同時';
+    legend.appendChild(c);
+  }
   editor.appendChild(legend);
 
   const list = document.createElement('div');
@@ -2270,15 +2344,83 @@ function renderEditRow(ctx, seg, idx) {
   ed.speakers.forEach(sp => {
     const o = document.createElement('option');
     o.value = sp;
-    o.textContent = (sp === 'ナレーター' ? '📖 ' : '💬 ') + sp;
+    o.textContent = speakerLabel(sp);
     sel.appendChild(o);
   });
+  // 複数人同時：現在の組み合わせを表す選択肢（必要なときだけ表示）
+  const curMultiOpt = document.createElement('option');
+  curMultiOpt.dataset.cur = '1';
+  const multiOpt = document.createElement('option');
+  multiOpt.value = '__multi__';
+  multiOpt.textContent = '👥 複数人が同時に…';
+  sel.appendChild(curMultiOpt);
+  sel.appendChild(multiOpt);
   const newOpt = document.createElement('option');
   newOpt.value = '__new__';
   newOpt.textContent = '＋ 新しい話者を追加…';
   sel.appendChild(newOpt);
-  sel.value = seg.speaker;
+
+  // 複数人を選ぶチェックボックスのパネル
+  const multiPanel = document.createElement('div');
+  multiPanel.className = 'multi-panel';
+  multiPanel.style.display = 'none';
+  function syncSelect() {
+    if (isMultiSpeaker(seg.speaker)) {
+      curMultiOpt.hidden = false;
+      curMultiOpt.value = seg.speaker;
+      curMultiOpt.textContent = '👥 ' + seg.speaker;
+    } else {
+      curMultiOpt.hidden = true;
+      curMultiOpt.value = '__cur__';
+    }
+    sel.value = seg.speaker;
+    row.style.setProperty('--sp-color', speakerColor(ctx, seg.speaker));
+  }
+  function rebuildMultiPanel() {
+    multiPanel.innerHTML = '';
+    const cands = ed.speakers.filter(s => s !== 'ナレーター');
+    const current = new Set(isAllSpeakersWord(seg.speaker) ? [] : splitSpeakers(seg.speaker));
+    const title = document.createElement('span');
+    title.textContent = '同時に言う人：';
+    multiPanel.appendChild(title);
+    const boxes = [];
+    const apply = () => {
+      const chosen = boxes.filter(b => b.cb.checked).map(b => b.name);
+      if (allCb.checked) seg.speaker = 'みんな';
+      else if (chosen.length) seg.speaker = chosen.join('・');
+      else return; // 何も選んでいないときは変えない
+      syncSelect();
+    };
+    cands.forEach(name => {
+      const lab = document.createElement('label');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = current.has(name);
+      cb.addEventListener('change', () => { if (cb.checked) allCb.checked = false; apply(); });
+      lab.appendChild(cb);
+      lab.appendChild(document.createTextNode(name));
+      multiPanel.appendChild(lab);
+      boxes.push({ name, cb });
+    });
+    const allLab = document.createElement('label');
+    const allCb = document.createElement('input');
+    allCb.type = 'checkbox';
+    allCb.checked = isAllSpeakersWord(seg.speaker);
+    allCb.addEventListener('change', () => { if (allCb.checked) boxes.forEach(b => { b.cb.checked = false; }); apply(); });
+    allLab.appendChild(allCb);
+    allLab.appendChild(document.createTextNode('みんな（全員）'));
+    multiPanel.appendChild(allLab);
+  }
+  if (isMultiSpeaker(seg.speaker)) { multiPanel.style.display = 'flex'; rebuildMultiPanel(); }
+  syncSelect();
   sel.addEventListener('change', () => {
+    if (sel.value === '__multi__') {
+      multiPanel.style.display = 'flex';
+      rebuildMultiPanel();
+      syncSelect(); // 人を選ぶまでは元の話者のまま
+      return;
+    }
+    if (sel.value === '__cur__') { syncSelect(); return; }
     if (sel.value === '__new__') {
       const name = (prompt('新しい話者の名前を入力してください（例：たろう）') || '').trim().replace(/[\[\]]/g, '');
       if (!name) { sel.value = seg.speaker; return; }
@@ -2291,11 +2433,13 @@ function renderEditRow(ctx, seg, idx) {
       return;
     }
     seg.speaker = sel.value;
-    row.style.setProperty('--sp-color', speakerColor(ctx, seg.speaker));
+    multiPanel.style.display = 'none';
+    syncSelect();
   });
   head.appendChild(num);
   head.appendChild(sel);
   row.appendChild(head);
+  row.appendChild(multiPanel);
 
   const ta = document.createElement('textarea');
   ta.value = seg.text;
@@ -2412,18 +2556,93 @@ function buildPlaybackPlan(text) {
   const segments = parseSpeakerSegments(source);
   if (segments.length === 0) return null;
   loadVoiceAssignments();
+  // engineに応じてテキストを整形：Fish Audio→感情タグ残す、Google/Aivis→タグ除去
+  const textFor = (engine, text) => engine === 'fish' ? text : stripEmotionTags(text);
   return segments.map(s => {
-    const v = getVoiceForSpeaker(s.speaker);
-    // engineに応じてテキストを整形：Fish Audio→感情タグ残す、Google/Aivis→タグ除去
-    const textForTTS = v.engine === 'fish' ? s.text : stripEmotionTags(s.text);
+    // 複数人が同時に言うセリフ：人ごとの声を全部持たせ、再生時にミックスする
+    const names = isMultiSpeaker(s.speaker) ? expandSpeakers(s.speaker) : [s.speaker];
+    if (names.length > 1) {
+      const voices = names.map(n => {
+        const v = getVoiceForSpeaker(n);
+        return { speaker: n, engine: v.engine, voiceId: v.voiceId, textForTTS: textFor(v.engine, s.text) };
+      });
+      return {
+        text: s.text,
+        textForTTS: stripEmotionTags(s.text),
+        engine: voices[0].engine,
+        voiceId: voices[0].voiceId,
+        speaker: s.speaker,
+        multi: true,
+        voices,
+      };
+    }
+    const v = getVoiceForSpeaker(names[0] || s.speaker);
     return {
       text: s.text,         // 原文（タグ込み）
-      textForTTS,           // エンジンに渡すテキスト
+      textForTTS: textFor(v.engine, s.text), // エンジンに渡すテキスト
       engine: v.engine,
       voiceId: v.voiceId,
       speaker: s.speaker,
     };
   }).filter(s => s.textForTTS && s.textForTTS.length > 0);
+}
+
+// 1つの声を合成してURLを返す（エンジン共通の入口）
+async function synthVoiceToUrl(engine, voiceId, text) {
+  if (engine === 'google') return await synthGoogleToDataUrl(text, voiceId);
+  if (engine === 'fish') return await synthFishToBlobUrl(text, voiceId);
+  if (engine === 'elevenlabs') return await synthElevenLabsToBlobUrl(text, voiceId);
+  if (engine === 'aivis') return await synthAivisToBlobUrl(text, voiceId);
+  throw new Error('対応していないエンジン: ' + engine);
+}
+
+// 複数人が同時に言うセリフ：人ごとに音声を作り、重ねて1つの音声にする
+async function synthMultiSegToUrl(seg) {
+  const urls = [];
+  for (const v of seg.voices) {
+    urls.push(await synthVoiceToUrl(v.engine, v.voiceId, v.textForTTS));
+  }
+  try {
+    const mixed = await mixAudioUrls(urls);
+    urls.forEach(u => { if (u.startsWith('blob:')) URL.revokeObjectURL(u); });
+    return mixed;
+  } catch (e) {
+    console.warn('[同時セリフ] ミックス失敗。先頭の声だけ再生します:', e);
+    urls.slice(1).forEach(u => { if (u.startsWith('blob:')) URL.revokeObjectURL(u); });
+    return urls[0];
+  }
+}
+
+// 複数の音声URLをデコードして同時に鳴らした1本のWAVにする
+async function mixAudioUrls(urls) {
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  const ctx = new Ctx();
+  const bufs = [];
+  try {
+    for (const u of urls) {
+      const ab = await (await fetch(u)).arrayBuffer();
+      bufs.push(await ctx.decodeAudioData(ab));
+    }
+  } finally {
+    try { ctx.close(); } catch (_) {}
+  }
+  if (!bufs.length) throw new Error('音声がありません');
+  const rate = Math.max.apply(null, bufs.map(b => b.sampleRate));
+  const dur = Math.max.apply(null, bufs.map(b => b.duration));
+  const off = new OfflineAudioContext(1, Math.max(1, Math.ceil(dur * rate)), rate);
+  // 重ねると音が割れやすいので人数に応じて少し下げる
+  const gainVal = 1 / Math.sqrt(bufs.length);
+  bufs.forEach(b => {
+    const s = off.createBufferSource();
+    s.buffer = b;
+    const g = off.createGain();
+    g.gain.value = gainVal;
+    s.connect(g);
+    g.connect(off.destination);
+    s.start(0);
+  });
+  const rendered = await off.startRendering();
+  return URL.createObjectURL(encodeWav(rendered));
 }
 
 // iOS Safari対策: ユーザー操作直後にAudio要素をアンロックして使い回す
@@ -2501,10 +2720,11 @@ async function speak(text, storyCtx) {
     const plan = buildPlaybackPlan(text);
     if (plan && state.ttsEngine !== 'browser') {
       // Pre-flight: required API keys
-      const needsGoogle = plan.some(p => p.engine === 'google');
-      const needsFish = plan.some(p => p.engine === 'fish');
-      const needsEL = plan.some(p => p.engine === 'elevenlabs');
-      const needsAivis = plan.some(p => p.engine === 'aivis');
+      const engines = plan.flatMap(p => p.voices ? p.voices.map(v => v.engine) : [p.engine]);
+      const needsGoogle = engines.includes('google');
+      const needsFish = engines.includes('fish');
+      const needsEL = engines.includes('elevenlabs');
+      const needsAivis = engines.includes('aivis');
       if (needsGoogle && !state.ggKey) { alert('Google Cloud APIキーを設定してください'); return; }
       if (needsFish && !state.fishKey) { alert('Fish Audio APIキーを設定してください'); return; }
       if (needsEL && !state.elKey) { alert('ElevenLabs APIキーを設定してください'); return; }
@@ -2577,7 +2797,9 @@ async function speakMultiEngine(plan, myToken) {
       for (let attempt = 0; attempt < MAX_RETRY; attempt++) {
         try {
           let result;
-          if (seg.engine === 'google') {
+          if (seg.multi) {
+            result = await synthMultiSegToUrl(seg);
+          } else if (seg.engine === 'google') {
             result = await synthGoogleToDataUrl(seg.textForTTS, seg.voiceId);
           } else if (seg.engine === 'fish') {
             result = await synthFishToBlobUrl(seg.textForTTS, seg.voiceId);
@@ -4092,6 +4314,191 @@ document.getElementById('random-story-btn').addEventListener('click', () => {
   generateStory({ randomFullStory: true });
 });
 
+// =========================== バックアップ（書き出し／読み込み） ===========================
+// 履歴・設定・APIキー（appStore の yk_* 全部）と、任意で保存済み音声（IndexedDB）を1つのJSONにする。
+const BACKUP_FORMAT = 1;
+
+function blobToBase64(blob) {
+  return new Promise((res, rej) => {
+    const fr = new FileReader();
+    fr.onload = () => res(String(fr.result).split(',')[1] || '');
+    fr.onerror = () => rej(fr.error || new Error('読み込み失敗'));
+    fr.readAsDataURL(blob);
+  });
+}
+function base64ToBlob(b64, type) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type: type || 'audio/mpeg' });
+}
+function showBackupMsg(msg, isError) {
+  const el = document.getElementById('backup-msg');
+  el.style.display = 'block';
+  el.style.color = isError ? 'var(--danger)' : 'var(--success)';
+  el.textContent = msg;
+}
+
+// ファイルを端末に渡す。スマホは共有シート（iPhoneなら「"ファイル"に保存」）、PCはダウンロード。
+async function deliverFile(blob, name) {
+  const ua = navigator.userAgent || '';
+  const isMobile = /iPhone|iPad|iPod|Android/i.test(ua) || (navigator.maxTouchPoints > 1 && /Mac/.test(ua));
+  if (isMobile && navigator.share && navigator.canShare) {
+    try {
+      const file = new File([blob], name, { type: blob.type });
+      if (navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: name });
+        return 'share';
+      }
+    } catch (e) {
+      if (e && e.name === 'AbortError') return 'cancel';
+      // 共有できない環境はダウンロードにフォールバック
+    }
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+  return 'download';
+}
+
+async function exportBackup(includeAudio, onProgress) {
+  const store = {};
+  appStoreKeys().filter(k => k.indexOf('yk_') === 0).forEach(k => { store[k] = appStore.getItem(k); });
+  const backup = {
+    app: 'yomikikase',
+    format: BACKUP_FORMAT,
+    exportedAt: new Date().toISOString(),
+    store,
+    audio: [],
+  };
+  if (includeAudio) {
+    const keys = await AudioStore.keys().catch(() => []);
+    let n = 0;
+    for (const id of keys) {
+      n++;
+      if (onProgress) onProgress('⏳ 音声をまとめています… ' + n + '/' + keys.length);
+      const rec = await AudioStore.get(id).catch(() => null);
+      if (!rec || !rec.blob) continue;
+      backup.audio.push({
+        id: String(id), title: rec.title || '', createdAt: rec.createdAt || 0,
+        bytes: rec.bytes || rec.blob.size, segments: rec.segments || 0,
+        type: rec.blob.type || 'audio/mpeg', data: await blobToBase64(rec.blob),
+      });
+    }
+  }
+  const d = new Date();
+  const ymd = d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0');
+  const blob = new Blob([JSON.stringify(backup)], { type: 'application/json' });
+  const how = await deliverFile(blob, 'yomikikase-backup-' + ymd + '.json');
+  const history = JSON.parse(store.yk_history || '[]');
+  return { how, bytes: blob.size, stories: history.length, audio: backup.audio.length };
+}
+
+async function importBackup(file, onProgress) {
+  const text = await file.text();
+  let data;
+  try { data = JSON.parse(text); } catch (_) { throw new Error('バックアップファイルではありません（JSONとして読めません）'); }
+  if (!data || data.app !== 'yomikikase' || !data.store) throw new Error('このアプリのバックアップファイルではありません');
+  const incHistory = JSON.parse(data.store.yk_history || '[]');
+  const audioList = Array.isArray(data.audio) ? data.audio : [];
+  const when = data.exportedAt ? new Date(data.exportedAt).toLocaleString('ja-JP') : '不明';
+  const ok = confirm(
+    'バックアップを読み込みます。\n\n' +
+    '書き出し日時：' + when + '\n' +
+    '物語：' + incHistory.length + '件　音声：' + audioList.length + '件\n\n' +
+    '・履歴は今あるものと合体します（同じ物語は新しい方を残す）\n' +
+    '・設定とAPIキーはファイルの内容で上書きします\n\n' +
+    'よろしいですか？'
+  );
+  if (!ok) return null;
+
+  // 履歴：id で合体。同じ物語は修正日時が新しい方を残す
+  const cur = JSON.parse(appStore.getItem('yk_history') || '[]');
+  const byId = {};
+  cur.forEach(s => { if (s && s.id) byId[s.id] = s; });
+  incHistory.forEach(s => {
+    if (!s || !s.id) return;
+    const old = byId[s.id];
+    if (!old || (s.editedAt || 0) >= (old.editedAt || 0)) byId[s.id] = s;
+  });
+  const merged = Object.keys(byId).map(k => byId[k])
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+    .slice(0, 200);
+  appStore.setItem('yk_history', JSON.stringify(merged));
+
+  // 設定・APIキーなど：空でない値だけ上書き（ファイル側が空なら今の設定を残す）
+  Object.keys(data.store).forEach(k => {
+    if (k === 'yk_history' || k.indexOf('yk_') !== 0) return;
+    const v = data.store[k];
+    if (v === null || v === undefined || v === '') return;
+    appStore.setItem(k, String(v));
+  });
+
+  // 音声：IndexedDB に戻す
+  let restoredAudio = 0;
+  for (let i = 0; i < audioList.length; i++) {
+    const a = audioList[i];
+    if (onProgress) onProgress('⏳ 音声を戻しています… ' + (i + 1) + '/' + audioList.length);
+    if (!a || !a.id || !a.data) continue;
+    try {
+      const blob = base64ToBlob(a.data, a.type);
+      await AudioStore.put(a.id, { blob, title: a.title || '', createdAt: a.createdAt || Date.now(), bytes: blob.size, segments: a.segments || 0 });
+      restoredAudio++;
+    } catch (e) { console.warn('[復元] 音声の保存に失敗:', a.id, e); }
+  }
+  return { stories: merged.length, audio: restoredAudio };
+}
+
+document.getElementById('backup-export-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('backup-export-btn');
+  const includeAudio = document.getElementById('backup-include-audio').checked;
+  btn.disabled = true;
+  const orig = btn.textContent;
+  try {
+    btn.textContent = '⏳ 書き出し中…';
+    const r = await exportBackup(includeAudio, (m) => { btn.textContent = m; });
+    if (r.how === 'cancel') {
+      showBackupMsg('書き出しを取り消しました');
+    } else {
+      showBackupMsg('✅ 書き出しました（物語 ' + r.stories + '件、音声 ' + r.audio + '件、' + fmtBytes(r.bytes) + '）' +
+        (r.how === 'share' ? '。共有画面で「"ファイル"に保存」などを選んでください' : ''));
+    }
+  } catch (e) {
+    showBackupMsg('書き出せませんでした：' + e.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+});
+document.getElementById('backup-import-btn').addEventListener('click', () => {
+  document.getElementById('backup-file').click();
+});
+document.getElementById('backup-file').addEventListener('change', async (e) => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  const btn = document.getElementById('backup-import-btn');
+  btn.disabled = true;
+  const orig = btn.textContent;
+  try {
+    btn.textContent = '⏳ 読み込み中…';
+    const r = await importBackup(file, (m) => { btn.textContent = m; });
+    if (!r) { showBackupMsg('読み込みを取り消しました'); return; }
+    showBackupMsg('✅ 復元しました（物語 ' + r.stories + '件、音声 ' + r.audio + '件）。画面を読み込み直します…');
+    setTimeout(() => location.reload(), 1200);
+  } catch (err) {
+    showBackupMsg('読み込めませんでした：' + err.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+});
+
 document.getElementById('clear-history-btn').addEventListener('click', () => {
   if (!confirm('履歴をすべて削除しますか？この操作は取り消せません。')) return;
   state.history = [];
@@ -4222,6 +4629,7 @@ function fallbackPlanFor(story) {
 }
 
 async function synthSegToUrl(seg) {
+  if (seg.multi) return await synthMultiSegToUrl(seg);
   if (seg.engine === 'google') return await synthGoogleToDataUrl(seg.textForTTS, seg.voiceId);
   if (seg.engine === 'fish') return await synthFishToBlobUrl(seg.textForTTS, seg.voiceId);
   if (seg.engine === 'elevenlabs') return await synthElevenLabsToBlobUrl(seg.textForTTS, seg.voiceId);
@@ -4763,10 +5171,14 @@ function encodeMp3FromBuffer(buf, kbps) {
 }
 
 // パート群を「最後まで再生できる1本のファイル」にまとめる
+function isWavBytes(b) {
+  return b.length > 12 && b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46; // "RIFF"
+}
 async function buildSingleAudio(parts, onProgress) {
-  const cleaned = parts.map(stripMp3Tags).filter(p => p.length > 0);
+  // 複数人同時セリフのパートはWAV。MP3用のタグ除去を通すと壊れるのでそのまま扱う
+  const cleaned = parts.map(p => isWavBytes(p) ? p : stripMp3Tags(p)).filter(p => p.length > 0);
   if (!cleaned.length) throw new Error('音声データが空です');
-  const fmts = cleaned.map(mp3Format).filter(Boolean);
+  const fmts = cleaned.map(p => isWavBytes(p) ? null : mp3Format(p)).filter(Boolean);
   const same = fmts.length === cleaned.length &&
     fmts.every(f => f.sampleRate === fmts[0].sampleRate && f.channels === fmts[0].channels && f.version === fmts[0].version);
 
