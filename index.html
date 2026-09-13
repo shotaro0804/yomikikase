@@ -365,6 +365,8 @@ textarea#theme {
   font-size: 12px; cursor: pointer; white-space: nowrap;
 }
 .mini-btn.danger { color: var(--danger); border-color: rgba(255,107,138,0.35); }
+.mini-btn.play { color: #ff9ab5; border-color: rgba(255,100,150,0.35); background: rgba(255,100,150,0.10); }
+.mini-btn:disabled { opacity: .6; cursor: wait; }
 .editor .btn-row .btn { font-size: 14px; padding: 12px 8px; white-space: nowrap; }
 
 /* 修正モード：複数人が同時にしゃべる行の設定パネル */
@@ -692,7 +694,7 @@ textarea#theme {
     </div>
 
     <div style="text-align:center;color:var(--dim);font-size:11px;margin-top:32px">
-      よみきかせの星 v1.4（バックアップ・複数人同時セリフ対応）<br>
+      よみきかせの星 v1.5（修正画面で行ごとの試し聞き）<br>
       作：しょーたろー
     </div>
   </div>
@@ -2246,6 +2248,7 @@ function openEditor(ctx) {
 }
 
 function closeEditor(ctx) {
+  stopLinePreview();
   delete editors[ctx];
   const { body, editor } = editorEls(ctx);
   editor.style.display = 'none';
@@ -2265,6 +2268,7 @@ function miniBtn(label, onClick, cls) {
 function renderEditor(ctx, focusIndex) {
   const ed = editors[ctx];
   if (!ed) return;
+  stopLinePreview(); // 行の並びが変わるので、再生中の試し聞きは止める
   const { editor } = editorEls(ctx);
   editor.innerHTML = '';
 
@@ -2274,6 +2278,7 @@ function renderEditor(ctx, focusIndex) {
     '各行の名前で「だれがしゃべるか」を変えられます。文章もそのまま書き直せます。<br>' +
     'ナレーターの行にセリフが混ざっているときは、分けたい位置を文章の中でタップしてから「✂ ここで分割」を押し、分かれた行の話者を変えてください。<br>' +
     '「えー！」のように複数人が同時に言うセリフは、名前の欄で「👥 複数人が同時に…」を選んで人を選びます。<br>' +
+    '各行の「🔊 試し聞き」で、その行だけを今の声の割り当てで読み上げて確認できます。<br>' +
     '<span style="opacity:.8">※ [happy] のような英語のタグは音声用の感情指定です。残しても消してもかまいません。</span>';
   editor.appendChild(hint);
 
@@ -2452,6 +2457,8 @@ function renderEditRow(ctx, seg, idx) {
 
   const actions = document.createElement('div');
   actions.className = 'edit-row-actions';
+  const playBtn = miniBtn('🔊 試し聞き', () => previewEditLine(ctx, seg, playBtn), 'play');
+  actions.appendChild(playBtn);
   actions.appendChild(miniBtn('✂ ここで分割', () => {
     const t = ta.value;
     const pos = ta.selectionStart;
@@ -2477,6 +2484,129 @@ function renderEditRow(ctx, seg, idx) {
   }, 'danger'));
   row.appendChild(actions);
   return row;
+}
+
+// =========================== 修正モード：1行だけ試し聞き ===========================
+// その行の文章を、今の声の割り当て（複数人なら重ねて）で読み上げる。
+// メインのよみあげ（state.speaking）とは別管理。行を変えたり編集を閉じたりすると止まる。
+const linePreview = { audio: null, btn: null, token: 0 };
+const LINE_PREVIEW_LABEL = '🔊 試し聞き';
+
+function stopLinePreview() {
+  linePreview.token++;
+  if (linePreview.audio) {
+    try { linePreview.audio.pause(); } catch (_) {}
+    linePreview.audio = null;
+  }
+  if (window.speechSynthesis) { try { window.speechSynthesis.cancel(); } catch (_) {} }
+  if (linePreview.btn) {
+    linePreview.btn.textContent = LINE_PREVIEW_LABEL;
+    linePreview.btn.disabled = false;
+    linePreview.btn = null;
+  }
+}
+
+// 話者タグ（複数人含む）→ 声の一覧。対象の物語の架空キャラ情報を使うため state.story を一時的に差し替える
+function voicesForSpeakerTag(tag, story) {
+  const prev = state.story;
+  state.story = story;
+  try {
+    loadVoiceAssignments();
+    let names = isMultiSpeaker(tag) ? expandSpeakers(tag, story) : [tag];
+    if (!names.length) names = [tag];
+    return names.map(n => {
+      const v = getVoiceForSpeaker(n);
+      return { speaker: n, engine: v.engine, voiceId: v.voiceId };
+    });
+  } finally {
+    state.story = prev;
+  }
+}
+
+function missingKeyMessage(engines) {
+  if (engines.includes('google') && !state.ggKey) return 'Google Cloud APIキーを設定してください';
+  if (engines.includes('fish') && !state.fishKey) return 'Fish Audio APIキーを設定してください';
+  if (engines.includes('elevenlabs') && !state.elKey) return 'ElevenLabs APIキーを設定してください';
+  if (engines.includes('aivis') && !state.aivisKey) return 'Aivis Cloud APIキーを設定してください';
+  return '';
+}
+
+async function previewEditLine(ctx, seg, btn) {
+  const ed = editors[ctx];
+  if (!ed) return;
+  // 同じボタンをもう一度押したら停止
+  if (linePreview.btn === btn) { stopLinePreview(); return; }
+  stopLinePreview();
+  if (state.speaking) stopSpeak();
+
+  const text = (seg.text || '').trim();
+  if (!text) { alert('文章が空です'); return; }
+  const myToken = ++linePreview.token;
+  linePreview.btn = btn;
+  btn.disabled = true;
+  btn.textContent = '⏳ 生成中…';
+  const rate = parseFloat(document.getElementById('rate').value) || 0.85;
+  const finish = () => {
+    if (linePreview.btn === btn) {
+      btn.textContent = LINE_PREVIEW_LABEL;
+      btn.disabled = false;
+      linePreview.btn = null;
+    }
+  };
+  unlockAudio(); // iOS対策：ユーザー操作の直後に音声をアンロック
+
+  try {
+    const voices = voicesForSpeakerTag(seg.speaker, ed.story);
+    const cloudEngines = ['google', 'fish', 'elevenlabs', 'aivis'];
+    const useCloud = state.ttsEngine !== 'browser' && voices.every(v => cloudEngines.includes(v.engine) && v.voiceId);
+
+    if (!useCloud) {
+      // 端末内蔵音声で読む（複数人でも1つの声）
+      if (!('speechSynthesis' in window)) throw new Error('この端末は音声読み上げに対応していません');
+      const u = new SpeechSynthesisUtterance(stripEmotionTags(text));
+      u.lang = 'ja-JP';
+      u.rate = rate;
+      u.onend = finish;
+      u.onerror = finish;
+      btn.disabled = false;
+      btn.textContent = '⏹ 止める';
+      window.speechSynthesis.speak(u);
+      return;
+    }
+
+    const missing = missingKeyMessage(voices.map(v => v.engine));
+    if (missing) throw new Error(missing);
+
+    const textFor = (engine) => engine === 'fish' ? text : stripEmotionTags(text);
+    let url;
+    if (voices.length > 1) {
+      url = await synthMultiSegToUrl({ voices: voices.map(v => ({ speaker: v.speaker, engine: v.engine, voiceId: v.voiceId, textForTTS: textFor(v.engine) })) });
+    } else {
+      url = await synthVoiceToUrl(voices[0].engine, voices[0].voiceId, textFor(voices[0].engine));
+    }
+    // 生成中に別の行を押した／編集を閉じた → 捨てる
+    if (linePreview.token !== myToken) {
+      if (url && url.startsWith('blob:')) URL.revokeObjectURL(url);
+      return;
+    }
+    const audio = new Audio(url);
+    audio.playbackRate = rate;
+    linePreview.audio = audio;
+    const done = () => {
+      if (url.startsWith('blob:')) URL.revokeObjectURL(url);
+      if (linePreview.audio === audio) linePreview.audio = null;
+      finish();
+    };
+    audio.onended = done;
+    audio.onerror = done;
+    btn.disabled = false;
+    btn.textContent = '⏹ 止める';
+    try { await audio.play(); }
+    catch (e) { done(); throw new Error('再生できませんでした: ' + e.message); }
+  } catch (e) {
+    finish();
+    alert('試し聞きできませんでした\n' + e.message);
+  }
 }
 
 function cancelEditor(ctx) {
