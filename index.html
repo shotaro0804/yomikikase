@@ -678,7 +678,8 @@ textarea#theme {
       <div class="backup-note">
         履歴・設定・APIキーを1つのファイルに書き出して、機種変更やアプリの入れ直しのあとに読み込めます。<br>
         iPhoneでは共有画面が開くので「"ファイル"に保存」を選んでください。<br>
-        <b>⚠ ファイルにはAPIキーが含まれます。他の人に渡さないでください。</b>
+        <b>⚠ ファイルにはAPIキーが含まれます。他の人に渡さないでください。</b><br>
+        ※ 音声キャッシュは含みません（必要になったときに作り直されます）。
       </div>
       <label class="check-row">
         <input type="checkbox" id="backup-include-audio" checked>
@@ -690,11 +691,16 @@ textarea#theme {
       </div>
       <input type="file" id="backup-file" accept=".json,application/json" style="display:none">
       <div id="backup-msg" style="font-size:12px;color:var(--success);margin-top:8px;line-height:1.6;display:none"></div>
+      <div style="margin-top:14px;font-size:12px;color:var(--dim);line-height:1.6;background:rgba(0,0,0,0.25);border-radius:8px;padding:8px 10px">
+        🎧 音声キャッシュ：<span id="unit-cache-stats">計算中…</span><br>
+        <span style="opacity:.85">同じ文・同じ声の音声は端末に残して二度と作りません（よみあげ・試し聞き・音声の保存で共通）。Aivisは話者ごとにまとめて1回で作ります。バックアップには含まれません。</span>
+      </div>
+      <button class="btn btn-secondary" id="unit-cache-clear-btn" style="margin-top:8px;font-size:13px">🧹 音声キャッシュを消す</button>
       <button class="btn btn-secondary" id="clear-history-btn" style="margin-top:14px">📭 履歴を全削除</button>
     </div>
 
     <div style="text-align:center;color:var(--dim);font-size:11px;margin-top:32px">
-      よみきかせの星 v1.5（修正画面で行ごとの試し聞き）<br>
+      よみきかせの星 v1.6（音声キャッシュ・Aivisまとめ生成でクレジット節約）<br>
       作：しょーたろー
     </div>
   </div>
@@ -955,6 +961,7 @@ document.querySelectorAll('.tab').forEach(t => {
     document.getElementById('page-' + t.dataset.tab).style.display = 'block';
     if (t.dataset.tab === 'history') renderHistory();
     if (t.dataset.tab === 'settings') {
+      refreshUnitCacheStats();
       document.getElementById('api-key').value = state.apiKey;
       document.getElementById('gemini-key').value = state.geminiKey;
       document.getElementById('model-select').value = state.model;
@@ -2577,13 +2584,10 @@ async function previewEditLine(ctx, seg, btn) {
     const missing = missingKeyMessage(voices.map(v => v.engine));
     if (missing) throw new Error(missing);
 
-    const textFor = (engine) => engine === 'fish' ? text : stripEmotionTags(text);
-    let url;
-    if (voices.length > 1) {
-      url = await synthMultiSegToUrl({ voices: voices.map(v => ({ speaker: v.speaker, engine: v.engine, voiceId: v.voiceId, textForTTS: textFor(v.engine) })) });
-    } else {
-      url = await synthVoiceToUrl(voices[0].engine, voices[0].voiceId, textFor(voices[0].engine));
-    }
+    // その行だけの計画を立てて取得（キャッシュにあればAPIを呼ばない）
+    const linePlan = await buildAudioPlan(ed.story, [{ speaker: seg.speaker, text }]);
+    if (!linePlan) throw new Error('読み上げる文章がありません');
+    const url = await resolveSegmentUrl(linePlan.segments[0], linePlan, newUnitSession());
     // 生成中に別の行を押した／編集を閉じた → 捨てる
     if (linePreview.token !== myToken) {
       if (url && url.startsWith('blob:')) URL.revokeObjectURL(url);
@@ -2680,41 +2684,326 @@ document.querySelectorAll('.edit-btn').forEach(b => {
 // =========================== TTS ===========================
 // Build playback plan: array of { text, textForTTS, engine, voiceId, speaker }
 // Returns null if no speaker tags found → caller falls back to single-voice mode.
-function buildPlaybackPlan(text) {
-  // Use rawBody if available so we can read speaker tags
-  const source = (state.story && state.story.rawBody) || text;
-  const segments = parseSpeakerSegments(source);
-  if (segments.length === 0) return null;
-  loadVoiceAssignments();
-  // engineに応じてテキストを整形：Fish Audio→感情タグ残す、Google/Aivis→タグ除去
-  const textFor = (engine, text) => engine === 'fish' ? text : stripEmotionTags(text);
-  return segments.map(s => {
-    // 複数人が同時に言うセリフ：人ごとの声を全部持たせ、再生時にミックスする
-    const names = isMultiSpeaker(s.speaker) ? expandSpeakers(s.speaker) : [s.speaker];
-    if (names.length > 1) {
-      const voices = names.map(n => {
-        const v = getVoiceForSpeaker(n);
-        return { speaker: n, engine: v.engine, voiceId: v.voiceId, textForTTS: textFor(v.engine, s.text) };
-      });
-      return {
-        text: s.text,
-        textForTTS: stripEmotionTags(s.text),
-        engine: voices[0].engine,
-        voiceId: voices[0].voiceId,
-        speaker: s.speaker,
-        multi: true,
-        voices,
-      };
+// =========================== 音声ユニット（キャッシュ＋まとめ生成でクレジット節約） ===========================
+// Web版（yomi）と同じ考え方をブラウザの中だけで実現する：
+//  ・「エンジン＋声＋文」のハッシュを鍵にして、一度作った音声は端末内（IndexedDB）に残し、二度と作らない
+//    → よみあげ・試し聞き・音声の保存で共通。文章を修正しても、変えていない行は作り直さない
+//  ・Aivis は同じ話者のセリフを改行でつないで1リクエストにし（セリフ間に無音2秒）、ブラウザで無音を目印に切り分ける
+//    → 定額プランの「1分10回」の制限に当たりにくく、待ち時間も短い。切り分けが合わないときは1行ずつに戻す
+//  ・Aivis は 64kbps（声だけなら十分。容量が約3分の1）
+const UNIT_GAP_SECONDS = 2.0;        // Aivisまとめ生成のセリフ間の無音（秒）
+const UNIT_SPLIT_MIN_SILENCE = 1.5;  // これ以上の無音だけを区切りとみなす（セリフ途中の「……」では切らない）
+const UNIT_AIVIS_MAX_CHARS = 2800;   // Aivis APIの上限3,000文字に余裕をみる
+const UNIT_AIVIS_BITRATE = 64;
+const UNIT_CACHE_MAX_BYTES = 300 * 1024 * 1024; // これを超えたら古いものから消す
+
+async function sha256Hex(str) {
+  try {
+    if (window.crypto && crypto.subtle) {
+      const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+      return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
     }
-    const v = getVoiceForSpeaker(names[0] || s.speaker);
-    return {
-      text: s.text,         // 原文（タグ込み）
-      textForTTS: textFor(v.engine, s.text), // エンジンに渡すテキスト
-      engine: v.engine,
-      voiceId: v.voiceId,
-      speaker: s.speaker,
+  } catch (_) {}
+  // crypto.subtle が使えない環境（http など）用の簡易ハッシュ
+  let h1 = 0x811c9dc5, h2 = 0x01000193;
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;
+    h2 = Math.imul(h2 ^ c, 0x811c9dc5) >>> 0;
+  }
+  return 'f' + h1.toString(16).padStart(8, '0') + h2.toString(16).padStart(8, '0') + str.length.toString(16);
+}
+function unitKeyOf(engine, voiceId, params, text) {
+  return sha256Hex([engine, voiceId || '', params || '', text].join('|'));
+}
+// 1行ぶんの読み上げ文（感情タグを除き、改行は空白に）
+const ttsLineText = (t) => stripEmotionTags(t).replace(/\n+/g, ' ').trim();
+
+// --- 端末内キャッシュ（AudioStore の units / unit_meta ストア） ---
+const UnitCache = {
+  has: async (key) => { try { return !!(await AudioStore.unitMeta(key)); } catch (_) { return false; } },
+  get: async (key) => {
+    try {
+      const blob = await AudioStore.unitBlob(key);
+      if (!blob) return null;
+      const meta = (await AudioStore.unitMeta(key)) || { bytes: blob.size, createdAt: Date.now() };
+      meta.lastUsed = Date.now();
+      AudioStore.unitTouch(key, meta).catch(() => {});
+      return blob;
+    } catch (_) { return null; }
+  },
+  put: async (key, blob, meta) => {
+    try {
+      await AudioStore.unitPut(key, blob, Object.assign({ bytes: blob.size, createdAt: Date.now(), lastUsed: Date.now() }, meta || {}));
+      pruneUnitCache().catch(() => {});
+    } catch (e) { console.warn('[音声キャッシュ] 保存できませんでした:', e); }
+  },
+  del: (key) => AudioStore.unitDel(key).catch(() => {}),
+  stats: async () => {
+    const rows = await AudioStore.unitMetaAll();
+    return { count: rows.length, bytes: rows.reduce((n, r) => n + (r.bytes || 0), 0) };
+  },
+  clear: () => AudioStore.unitClear(),
+};
+let unitPruning = false;
+async function pruneUnitCache() {
+  if (unitPruning) return;
+  unitPruning = true;
+  try {
+    const rows = await AudioStore.unitMetaAll();
+    let total = rows.reduce((n, r) => n + (r.bytes || 0), 0);
+    if (total <= UNIT_CACHE_MAX_BYTES) return;
+    rows.sort((a, b) => (a.lastUsed || 0) - (b.lastUsed || 0));
+    for (const r of rows) {
+      if (total <= UNIT_CACHE_MAX_BYTES * 0.9) break;
+      await AudioStore.unitDel(r.key);
+      total -= r.bytes || 0;
+    }
+  } finally { unitPruning = false; }
+}
+async function refreshUnitCacheStats() {
+  const el = document.getElementById('unit-cache-stats');
+  if (!el) return;
+  try {
+    const s = await UnitCache.stats();
+    el.textContent = s.count + '個・' + fmtBytes(s.bytes);
+  } catch (_) { el.textContent = '（この環境では使えません）'; }
+}
+
+// 話者ごとの声を、対象の物語の情報（架空キャラの声など）で引く。state.story を一時的に差し替える（同期処理だけ）
+function segmentVoicesForStory(story, segs) {
+  const prev = state.story;
+  state.story = story;
+  try {
+    loadVoiceAssignments();
+    return segs.map(s => {
+      let names = isMultiSpeaker(s.speaker) ? expandSpeakers(s.speaker, story) : [s.speaker];
+      if (!names.length) names = [s.speaker];
+      return names.map(n => {
+        const v = getVoiceForSpeaker(n);
+        return { speaker: n, engine: v.engine, voiceId: v.voiceId };
+      });
+    });
+  } finally {
+    state.story = prev;
+  }
+}
+
+// 再生・保存の計画を立てる。
+// 戻り値 { segments: [{ i, speaker, text, sources: [{ key, slice }] }], units: Map(key → unit) }
+//   unit: { key, type: 'single'|'batch', engine, voiceId, speaker, text, segmentIndexes, lines? }
+//   sources の slice は、batch の何番目の切れ端か（single なら null）。複数人の同時セリフは sources が複数
+async function buildAudioPlan(story, segsOverride) {
+  const segs = segsOverride || parseSpeakerSegments((story && (story.rawBody || story.body)) || '');
+  if (!segs.length) return null;
+  const voicesPer = segmentVoicesForStory(story, segs);
+  const units = new Map();
+  const segments = segs.map((s, i) => ({ i, speaker: s.speaker, text: s.text, sources: [] }));
+  const aivisGroups = new Map(); // 話者|声 → { speaker, voiceId, lines: [{ i, text, key }] }
+
+  for (let i = 0; i < segs.length; i++) {
+    for (const v of voicesPer[i]) {
+      if (v.engine === 'aivis' && v.voiceId) {
+        const text = ttsLineText(segs[i].text);
+        if (!text) continue;
+        const gk = v.speaker + '|' + v.voiceId;
+        if (!aivisGroups.has(gk)) aivisGroups.set(gk, { speaker: v.speaker, voiceId: v.voiceId, lines: [] });
+        aivisGroups.get(gk).lines.push({ i, text });
+        continue;
+      }
+      // Google / ElevenLabs / Fish（Fishだけ感情タグを残す）：1行＝1ユニット
+      const text = v.engine === 'fish' ? segs[i].text.trim() : ttsLineText(segs[i].text);
+      if (!text) continue;
+      const key = await unitKeyOf(v.engine, v.voiceId, '', text);
+      if (!units.has(key)) units.set(key, { key, type: 'single', engine: v.engine, voiceId: v.voiceId, speaker: v.speaker, text, segmentIndexes: [i] });
+      else units.get(key).segmentIndexes.push(i);
+      segments[i].sources.push({ key, slice: null });
+    }
+  }
+
+  const aivisParams = 'b' + UNIT_AIVIS_BITRATE;
+  for (const g of aivisGroups.values()) {
+    // 1) 1行ぶんの音声がすでにあれば、それを使う（作り直さない）
+    const remaining = [];
+    for (const line of g.lines) {
+      line.key = await unitKeyOf('aivis', g.voiceId, aivisParams, line.text);
+      if (await UnitCache.has(line.key)) {
+        units.set(line.key, { key: line.key, type: 'single', engine: 'aivis', voiceId: g.voiceId, speaker: g.speaker, text: line.text, segmentIndexes: [line.i] });
+        segments[line.i].sources.push({ key: line.key, slice: null });
+      } else {
+        remaining.push(line);
+      }
+    }
+    // 2) 残りはまとめて1本（文字数の上限で分ける）。1行だけなら普通の1行ユニット
+    let chunk = [], len = 0;
+    const flush = async () => {
+      if (!chunk.length) return;
+      if (chunk.length === 1) {
+        const line = chunk[0];
+        units.set(line.key, { key: line.key, type: 'single', engine: 'aivis', voiceId: g.voiceId, speaker: g.speaker, text: line.text, segmentIndexes: [line.i] });
+        segments[line.i].sources.push({ key: line.key, slice: null });
+      } else {
+        const text = chunk.map(l => l.text).join('\n');
+        const key = await unitKeyOf('aivis', g.voiceId, aivisParams + '|gap' + UNIT_GAP_SECONDS, text);
+        units.set(key, { key, type: 'batch', engine: 'aivis', voiceId: g.voiceId, speaker: g.speaker, text, segmentIndexes: chunk.map(l => l.i), lines: chunk.slice() });
+        chunk.forEach((l, n) => segments[l.i].sources.push({ key, slice: n }));
+      }
+      chunk = [];
+      len = 0;
     };
-  }).filter(s => s.textForTTS && s.textForTTS.length > 0);
+    for (const line of remaining) {
+      const l = line.text.length + 1;
+      if (len + l > UNIT_AIVIS_MAX_CHARS) await flush();
+      chunk.push(line);
+      len += l;
+    }
+    await flush();
+  }
+
+  const usable = segments.filter(s => s.sources.length > 0);
+  if (!usable.length) return null;
+  return { segments: usable, units };
+}
+function planEngines(plan) {
+  return Array.from(plan.units.values()).map(u => u.engine);
+}
+
+// --- 合成（キャッシュに無いときだけAPIを呼ぶ） ---
+async function blobFromUrl(url) {
+  const b = await (await fetch(url)).blob();
+  if (url.startsWith('blob:')) URL.revokeObjectURL(url);
+  return b;
+}
+async function synthUnitBlob(unit) {
+  if (unit.engine === 'aivis') {
+    const url = await synthAivisToBlobUrl(unit.text, unit.voiceId, { bitrate: UNIT_AIVIS_BITRATE, gap: unit.type === 'batch' ? UNIT_GAP_SECONDS : 0 });
+    return await blobFromUrl(url);
+  }
+  return await blobFromUrl(await synthVoiceToUrl(unit.engine, unit.voiceId, unit.text));
+}
+
+// --- デコードと切り分け（Web版と同じ処理） ---
+let unitDecodeCtx = null;
+function getUnitDecodeCtx() {
+  if (!unitDecodeCtx) {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    try { unitDecodeCtx = new Ctx({ sampleRate: 24000 }); } catch (_) { unitDecodeCtx = new Ctx(); } // 声だけなので24kHzで十分
+  }
+  return unitDecodeCtx;
+}
+async function decodeBlob(blob) {
+  const ab = await blob.arrayBuffer();
+  return await getUnitDecodeCtx().decodeAudioData(ab);
+}
+// 無音を目印に切り分ける。minSilenceSec 以上の無音だけを区切りとみなす
+function splitBySilence(buffer, minSilenceSec, thresholdDb) {
+  minSilenceSec = minSilenceSec || UNIT_SPLIT_MIN_SILENCE;
+  thresholdDb = thresholdDb || -45;
+  const data = buffer.getChannelData(0), sr = buffer.sampleRate, win = Math.floor(sr * 0.01), thr = Math.pow(10, thresholdDb / 20);
+  const frames = Math.floor(data.length / win), loud = new Uint8Array(frames);
+  for (let f = 0; f < frames; f++) {
+    let sum = 0;
+    for (let i = f * win, e = i + win; i < e; i++) sum += data[i] * data[i];
+    loud[f] = Math.sqrt(sum / win) > thr ? 1 : 0;
+  }
+  const minSil = Math.round(minSilenceSec / 0.01), segs = [];
+  let s = -1, last = -1;
+  for (let f = 0; f < frames; f++) {
+    if (!loud[f]) continue;
+    if (s < 0) s = f;
+    else if (f - last > minSil) { segs.push([s, last]); s = f; }
+    last = f;
+  }
+  if (s >= 0) segs.push([s, last]);
+  const pad = 0.08;
+  return segs.map(([a, b]) => ({ start: Math.max(0, a * 0.01 - pad), end: Math.min(buffer.duration, (b + 1) * 0.01 + pad) }));
+}
+const sliceBuf = (buffer, start, end) => buffer.getChannelData(0).slice(Math.floor(start * buffer.sampleRate), Math.min(buffer.length, Math.ceil(end * buffer.sampleRate)));
+function encodeWavSamples(samples, sampleRate) {
+  const buf = new ArrayBuffer(44 + samples.length * 2), v = new DataView(buf);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, 'RIFF'); v.setUint32(4, 36 + samples.length * 2, true); w(8, 'WAVE'); w(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, sampleRate, true); v.setUint32(28, sampleRate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, 'data'); v.setUint32(40, samples.length * 2, true);
+  for (let i = 0, o = 44; i < samples.length; i++, o += 2) { const s = Math.max(-1, Math.min(1, samples[i])); v.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7fff, true); }
+  return new Blob([buf], { type: 'audio/wav' });
+}
+
+// --- 1回の再生・保存のあいだ、ユニットの取得を共有する ---
+function newUnitSession() { return { units: new Map(), badBatches: new Set(), fromCache: 0, synthesized: 0 }; }
+class BatchSplitError extends Error {}
+
+// ユニットの音声を用意する（キャッシュ → 無ければ合成して保存）。batch はデコードして切れ端の位置も返す
+function resolveUnit(unit, sess) {
+  if (sess.units.has(unit.key)) return sess.units.get(unit.key);
+  const p = (async () => {
+    let blob = await UnitCache.get(unit.key);
+    if (blob) {
+      sess.fromCache++;
+    } else {
+      blob = await synthUnitBlob(unit);
+      sess.synthesized++;
+      await UnitCache.put(unit.key, blob, { engine: unit.engine, voiceId: unit.voiceId, type: unit.type, chars: unit.text.length, speaker: unit.speaker });
+    }
+    if (unit.type !== 'batch') return { blob };
+    const buffer = await decodeBlob(blob);
+    const slices = splitBySilence(buffer);
+    if (slices.length !== unit.segmentIndexes.length) {
+      console.warn('[まとめ生成] 切り分け数が合いません（' + slices.length + ' != ' + unit.segmentIndexes.length + '）。1行ずつ作り直します');
+      UnitCache.del(unit.key); // 使えない音声は残さない
+      throw new BatchSplitError('split mismatch');
+    }
+    return { blob, buffer, slices };
+  })();
+  p.catch(e => {
+    if (e instanceof BatchSplitError) sess.badBatches.add(unit.key); // このセッションでは二度と試さない
+    else sess.units.delete(unit.key); // 失敗は覚えない（再試行できるように）
+  });
+  sess.units.set(unit.key, p);
+  return p;
+}
+
+// 1セグメントぶんの再生用URLを返す（single→そのまま、batchの切れ端→WAV、複数人→重ねてWAV）
+async function resolveSegmentUrl(seg, plan, sess) {
+  const parts = [];
+  for (const src of seg.sources) {
+    const unit = plan.units.get(src.key);
+    let r = null, useSingle = false;
+    if (unit.type === 'batch' && sess.badBatches.has(unit.key)) {
+      useSingle = true;
+    } else {
+      try { r = await resolveUnit(unit, sess); }
+      catch (e) { if (unit.type === 'batch' && e instanceof BatchSplitError) useSingle = true; else throw e; }
+    }
+    if (useSingle) {
+      // まとめ生成が使えなかった行は、1行ずつ作る（それも次からはキャッシュ）
+      const line = unit.lines[src.slice];
+      let su = plan.units.get(line.key);
+      if (!su) {
+        su = { key: line.key, type: 'single', engine: 'aivis', voiceId: unit.voiceId, speaker: unit.speaker, text: line.text, segmentIndexes: [line.i] };
+        plan.units.set(su.key, su);
+      }
+      r = await resolveUnit(su, sess);
+      parts.push({ blob: r.blob });
+    } else if (src.slice === null) {
+      parts.push({ blob: r.blob });
+    } else {
+      const s = r.slices[src.slice];
+      parts.push({ samples: sliceBuf(r.buffer, s.start, s.end), sampleRate: r.buffer.sampleRate });
+    }
+  }
+  if (parts.length === 1 && parts[0].blob) return URL.createObjectURL(parts[0].blob);
+  // 切れ端や複数人のセリフはサンプルにして（必要なら重ねて）WAVにする
+  const sets = [];
+  for (const p of parts) {
+    if (p.samples) sets.push(p);
+    else { const b = await decodeBlob(p.blob); sets.push({ samples: b.getChannelData(0), sampleRate: b.sampleRate }); }
+  }
+  const sr = sets[0].sampleRate; // 同じデコード用コンテキストなので揃っている
+  const len = Math.max.apply(null, sets.map(s => s.samples.length));
+  const mixed = new Float32Array(len);
+  const g = sets.length > 1 ? 1 / Math.sqrt(sets.length) : 1; // 重ねると音が割れやすいので少し下げる
+  for (const s of sets) for (let k = 0; k < s.samples.length; k++) mixed[k] += s.samples[k] * g;
+  return URL.createObjectURL(encodeWavSamples(mixed, sr));
 }
 
 // 1つの声を合成してURLを返す（エンジン共通の入口）
@@ -2847,10 +3136,10 @@ async function speak(text, storyCtx) {
     }
     acquireWakeLock();
     // Try multi-voice playback if speaker tags exist
-    const plan = buildPlaybackPlan(text);
-    if (plan && state.ttsEngine !== 'browser') {
+    const plan = (state.ttsEngine !== 'browser' && target) ? await buildAudioPlan(target) : null;
+    if (plan) {
       // Pre-flight: required API keys
-      const engines = plan.flatMap(p => p.voices ? p.voices.map(v => v.engine) : [p.engine]);
+      const engines = planEngines(plan);
       const needsGoogle = engines.includes('google');
       const needsFish = engines.includes('fish');
       const needsEL = engines.includes('elevenlabs');
@@ -2885,6 +3174,10 @@ async function speak(text, storyCtx) {
 
 // マルチエンジン再生：セグメントごとに別エンジンで音声を生成→順次再生
 async function speakMultiEngine(plan, myToken) {
+  // plan は { segments, units }。以降の処理はセグメント配列（plan）と、ユニット取得の共有セッション（sess）を使う
+  const audioPlan = plan;
+  plan = plan.segments;
+  const sess = newUnitSession();
   // myToken 未指定（旧来の呼び出し）でも動くようフォールバック
   if (myToken === undefined) myToken = ++state.playToken;
   // このループが今も最新の再生セッションか？ 違えば即停止する
@@ -2926,20 +3219,8 @@ async function speakMultiEngine(plan, myToken) {
       let lastErr = null;
       for (let attempt = 0; attempt < MAX_RETRY; attempt++) {
         try {
-          let result;
-          if (seg.multi) {
-            result = await synthMultiSegToUrl(seg);
-          } else if (seg.engine === 'google') {
-            result = await synthGoogleToDataUrl(seg.textForTTS, seg.voiceId);
-          } else if (seg.engine === 'fish') {
-            result = await synthFishToBlobUrl(seg.textForTTS, seg.voiceId);
-          } else if (seg.engine === 'elevenlabs') {
-            result = await synthElevenLabsToBlobUrl(seg.textForTTS, seg.voiceId);
-          } else if (seg.engine === 'aivis') {
-            result = await synthAivisToBlobUrl(seg.textForTTS, seg.voiceId);
-          } else {
-            result = null;
-          }
+          // キャッシュにあれば即、無ければ合成（Aivisは話者ごとにまとめて1回）
+          const result = await resolveSegmentUrl(seg, audioPlan, sess);
           audioUrls[i] = result;
           ready[i] = true;
           dbg(`  #${i+1} ✓生成完了`);
@@ -3083,10 +3364,11 @@ async function speakMultiEngine(plan, myToken) {
       state.audio = null;
       releaseWakeLock();
       updateSpeakBtns();
+      const saved = `キャッシュ${sess.fromCache}・新規${sess.synthesized}`;
       if (failures.length > 0) {
-        setStatus(`✓ 再生終了（${failures.length}/${plan.length}個が生成失敗）`);
+        setStatus(`✓ 再生終了（${failures.length}/${plan.length}個が生成失敗・${saved}）`);
       } else {
-        setStatus(`✓ 最後まで再生しました（全${plan.length}個）`);
+        setStatus(`✓ 最後まで再生しました（全${plan.length}個・${saved}）`);
         setTimeout(() => { if (statusEl && !state.speaking) statusEl.style.display = 'none'; }, 4000);
       }
     }
@@ -3142,15 +3424,19 @@ async function synthGoogleToDataUrl(text, voiceId) {
 
 // Aivis Cloud TTS：単一セグメントをblob URLとして返す
 // 日本国内サーバー、最速0.3秒、CORS対応で直接ブラウザから叩ける（プロキシ不要）
-async function synthAivisToBlobUrl(text, modelUuid) {
+async function synthAivisToBlobUrl(text, modelUuid, opts) {
   if (!modelUuid) throw new Error('Aivis: モデルUUIDが未設定');
+  opts = opts || {};
   const body = {
     model_uuid: modelUuid,
     text: text,
     use_ssml: false, // 子供向け読み聞かせは素のテキストで自然な読み上げに任せる
     output_format: 'mp3',
+    output_bitrate: opts.bitrate || UNIT_AIVIS_BITRATE, // 既定は約190kbpsで大きい。声だけなので64kbpsで十分
     language: 'ja',
   };
+  // まとめ生成：改行ごとにこの秒数の無音を入れる（ブラウザ側で無音を目印に切り分ける）
+  if (opts.gap) body.line_break_silence_seconds = opts.gap;
   let res;
   try {
     res = await fetch('https://api.aivis-project.com/v1/tts/synthesize', {
@@ -4629,6 +4915,12 @@ document.getElementById('backup-file').addEventListener('change', async (e) => {
   }
 });
 
+document.getElementById('unit-cache-clear-btn').addEventListener('click', async () => {
+  if (!confirm('音声キャッシュを消しますか？\n（次のよみあげで作り直すので、そのぶんクレジットを使います）')) return;
+  try { await UnitCache.clear(); } catch (_) {}
+  refreshUnitCacheStats();
+});
+
 document.getElementById('clear-history-btn').addEventListener('click', () => {
   if (!confirm('履歴をすべて削除しますか？この操作は取り消せません。')) return;
   state.history = [];
@@ -4679,7 +4971,8 @@ if (state.aivisVoices.length === 0) {
 
 // --- IndexedDB（音声Blob保管庫） ---
 const AudioStore = (() => {
-  const DB_NAME = 'yk_audio', STORE = 'files', VER = 1;
+  // files: 物語1本ぶんの保存音声 / units: 文＋声ごとの小さな音声（キャッシュ） / unit_meta: その大きさ・最終利用日時
+  const DB_NAME = 'yk_audio', STORE = 'files', UNITS = 'units', META = 'unit_meta', VER = 2;
   let dbp = null;
   function open() {
     if (dbp) return dbp;
@@ -4689,27 +4982,40 @@ const AudioStore = (() => {
       catch (e) { rej(e); return; }
       req.onupgradeneeded = () => {
         const db = req.result;
-        if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE);
+        [STORE, UNITS, META].forEach(n => { if (!db.objectStoreNames.contains(n)) db.createObjectStore(n); });
       };
       req.onsuccess = () => res(req.result);
       req.onerror = () => rej(req.error || new Error('IndexedDBを開けません'));
     });
     return dbp;
   }
-  function tx(mode, fn) {
+  // fn(トランザクション) は最後のリクエスト（結果が要るもの）を返す
+  function tx(stores, mode, fn) {
     return open().then(db => new Promise((res, rej) => {
-      const t = db.transaction(STORE, mode);
-      const req = fn(t.objectStore(STORE));
+      const t = db.transaction(stores, mode);
+      const req = fn(t);
       t.oncomplete = () => res(req ? req.result : undefined);
       t.onerror = () => rej(t.error);
       t.onabort = () => rej(t.error);
     }));
   }
+  const one = (store, mode, fn) => tx(store, mode, t => fn(t.objectStore(store)));
   return {
-    put: (key, val) => tx('readwrite', st => st.put(val, key)),
-    get: (key) => tx('readonly', st => st.get(key)),
-    del: (key) => tx('readwrite', st => st.delete(key)),
-    keys: () => tx('readonly', st => st.getAllKeys()),
+    put: (key, val) => one(STORE, 'readwrite', st => st.put(val, key)),
+    get: (key) => one(STORE, 'readonly', st => st.get(key)),
+    del: (key) => one(STORE, 'readwrite', st => st.delete(key)),
+    keys: () => one(STORE, 'readonly', st => st.getAllKeys()),
+    // --- 音声ユニットのキャッシュ ---
+    unitMeta: (key) => one(META, 'readonly', st => st.get(key)),
+    unitBlob: (key) => one(UNITS, 'readonly', st => st.get(key)),
+    unitPut: (key, blob, meta) => tx([UNITS, META], 'readwrite', t => { t.objectStore(UNITS).put(blob, key); return t.objectStore(META).put(meta, key); }),
+    unitTouch: (key, meta) => one(META, 'readwrite', st => st.put(meta, key)),
+    unitDel: (key) => tx([UNITS, META], 'readwrite', t => { t.objectStore(UNITS).delete(key); return t.objectStore(META).delete(key); }),
+    unitMetaAll: () => one(META, 'readonly', st => {
+      const k = st.getAllKeys(), v = st.getAll();
+      return { get result() { return k.result.map((key, i) => Object.assign({ key }, v.result[i] || {})); } };
+    }),
+    unitClear: () => tx([UNITS, META], 'readwrite', t => { t.objectStore(UNITS).clear(); return t.objectStore(META).clear(); }),
   };
 })();
 
@@ -4721,13 +5027,6 @@ function fmtBytes(n) {
   return n.toFixed(i ? 1 : 0) + ' ' + u[i];
 }
 
-// buildPlaybackPlan は同期関数なので、この一瞬だけ state.story を差し替えても競合しない
-function planForStory(story) {
-  const prev = state.story;
-  state.story = story;
-  try { return buildPlaybackPlan(story.rawBody || story.body); }
-  finally { state.story = prev; }
-}
 
 // 話者タグが無い物語用：本文を適度な長さに分割する
 function splitForTTS(text, max = 180) {
@@ -4742,7 +5041,8 @@ function splitForTTS(text, max = 180) {
   return out.map(t => t.trim()).filter(Boolean);
 }
 
-function fallbackPlanFor(story) {
+// 話者タグが無い物語用：デフォルトの声で、適度な長さに分けた1行ユニットの計画にする
+async function fallbackAudioPlan(story) {
   const eng = state.ttsEngine;
   const voice = eng === 'google' ? state.ggVoice
     : eng === 'elevenlabs' ? state.elVoice
@@ -4751,27 +5051,26 @@ function fallbackPlanFor(story) {
   if (eng === 'browser' || !voice) {
     throw new Error('端末内蔵音声は保存できません。設定でクラウド音声（Aivisなど）を選んでください');
   }
-  const keepTags = (eng === 'fish');
-  return splitForTTS(story.rawBody || story.body).map(t => ({
-    engine: eng, voiceId: voice, speaker: 'ナレーター',
-    textForTTS: keepTags ? t : stripEmotionTags(t),
-  }));
-}
-
-async function synthSegToUrl(seg) {
-  if (seg.multi) return await synthMultiSegToUrl(seg);
-  if (seg.engine === 'google') return await synthGoogleToDataUrl(seg.textForTTS, seg.voiceId);
-  if (seg.engine === 'fish') return await synthFishToBlobUrl(seg.textForTTS, seg.voiceId);
-  if (seg.engine === 'elevenlabs') return await synthElevenLabsToBlobUrl(seg.textForTTS, seg.voiceId);
-  if (seg.engine === 'aivis') return await synthAivisToBlobUrl(seg.textForTTS, seg.voiceId);
-  throw new Error('保存に対応していないエンジン: ' + seg.engine);
+  const chunks = splitForTTS(story.rawBody || story.body);
+  const units = new Map(), segments = [];
+  for (let i = 0; i < chunks.length; i++) {
+    const text = eng === 'fish' ? chunks[i] : ttsLineText(chunks[i]);
+    if (!text) continue;
+    const key = await unitKeyOf(eng, voice, eng === 'aivis' ? 'b' + UNIT_AIVIS_BITRATE : '', text);
+    units.set(key, { key, type: 'single', engine: eng, voiceId: voice, speaker: 'ナレーター', text, segmentIndexes: [i] });
+    segments.push({ i, speaker: 'ナレーター', text, sources: [{ key, slice: null }] });
+  }
+  if (!segments.length) throw new Error('読み上げる文章がありません');
+  return { segments, units };
 }
 
 // 全セグメントを生成してMP3を1本に連結し保存する。
 // 各エンジンともMP3出力なので、再エンコード不要＝音質劣化なし・容量最小で連結できる。
 async function exportStoryAudio(story, onProgress) {
-  let plan = planForStory(story);
-  if (!plan || !plan.length) plan = fallbackPlanFor(story);
+  let audioPlan = state.ttsEngine !== 'browser' ? await buildAudioPlan(story) : null;
+  if (!audioPlan) audioPlan = await fallbackAudioPlan(story);
+  const plan = audioPlan.segments;
+  const sess = newUnitSession(); // よみあげで作った音声はキャッシュにあるので、ここでは作り直さない
   const parts = new Array(plan.length).fill(null);
   const queue = plan.map((seg, i) => ({ seg, i }));
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -4782,7 +5081,7 @@ async function exportStoryAudio(story, onProgress) {
       const { seg, i } = queue.shift();
       for (let a = 0; a < 4; a++) {
         try {
-          const url = await synthSegToUrl(seg);
+          const url = await resolveSegmentUrl(seg, audioPlan, sess);
           const buf = await (await fetch(url)).arrayBuffer();
           parts[i] = new Uint8Array(buf);
           if (url.indexOf('blob:') === 0) URL.revokeObjectURL(url);
@@ -4809,7 +5108,7 @@ async function exportStoryAudio(story, onProgress) {
   await AudioStore.put(story.id, {
     blob, title: story.title, createdAt: Date.now(), bytes: blob.size, segments: good.length,
   });
-  return { blob, failed, total: plan.length };
+  return { blob, failed, total: plan.length, fromCache: sess.fromCache, synthesized: sess.synthesized };
 }
 
 // --- 保存済み音声の再生（バックグラウンド再生対応） ---
