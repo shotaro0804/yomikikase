@@ -735,6 +735,15 @@ textarea#fixed-theme {
       </div>
       <input type="file" id="backup-file" accept=".json,application/json" style="display:none">
       <div id="backup-msg" style="font-size:12px;color:var(--success);margin-top:8px;line-height:1.6;display:none"></div>
+      <details id="tts-log-details" style="margin-top:14px">
+        <summary style="font-size:12px;color:var(--muted);cursor:pointer">🩺 音声の直近ログ（うまく作れないとき、これを送ってください）</summary>
+        <textarea id="tts-log-view" readonly style="margin-top:8px;min-height:160px;font-size:11px;line-height:1.5;font-family:ui-monospace,Menlo,monospace;resize:vertical"></textarea>
+        <div style="display:flex;gap:6px;margin-top:6px">
+          <button class="mini-btn" id="tts-log-refresh">🔄 更新</button>
+          <button class="mini-btn" id="tts-log-copy">📋 コピー</button>
+          <button class="mini-btn" id="tts-log-clear">🧹 消す</button>
+        </div>
+      </details>
       <div style="margin-top:14px;font-size:12px;color:var(--dim);line-height:1.6;background:rgba(0,0,0,0.25);border-radius:8px;padding:8px 10px">
         🎧 音声キャッシュ：<span id="unit-cache-stats">計算中…</span><br>
         <span style="opacity:.85">同じ文・同じ声の音声は端末に残して二度と作りません（よみあげ・試し聞き・音声の保存で共通）。Aivisは話者ごとにまとめて1回で作ります。バックアップには含まれません。</span>
@@ -744,7 +753,7 @@ textarea#fixed-theme {
     </div>
 
     <div style="text-align:center;color:var(--dim);font-size:11px;margin-top:32px">
-      よみきかせの星 v1.7（登場人物パターン・固定テーマ）<br>
+      よみきかせの星 v1.8（音声生成の安定化・音声ログ）<br>
       作：しょーたろー
     </div>
   </div>
@@ -2755,8 +2764,20 @@ document.querySelectorAll('.edit-btn').forEach(b => {
 //  ・Aivis は同じ話者のセリフを改行でつないで1リクエストにし（セリフ間に無音2秒）、ブラウザで無音を目印に切り分ける
 //    → 定額プランの「1分10回」の制限に当たりにくく、待ち時間も短い。切り分けが合わないときは1行ずつに戻す
 //  ・Aivis は 64kbps（声だけなら十分。容量が約3分の1）
-const UNIT_GAP_SECONDS = 2.0;        // Aivisまとめ生成のセリフ間の無音（秒）
-const UNIT_SPLIT_MIN_SILENCE = 1.5;  // これ以上の無音だけを区切りとみなす（セリフ途中の「……」では切らない）
+const UNIT_GAP_SECONDS = 3.0;        // Aivisまとめ生成のセリフ間の無音（秒）。声の自然な間（1秒前後）と混ざらないよう広め
+const UNIT_SPLIT_MIN_SILENCE = 2.2;  // これ以上の無音だけを区切りとみなす（セリフ途中の「……」では切らない）
+
+// --- 音声ログ（画面の設定タブから見られる。iPhoneではコンソールが見えないため） ---
+const TTS_LOG_MAX = 150;
+const ttsLogLines = [];
+function ttsLog(line) {
+  const t = new Date();
+  const ts = [t.getHours(), t.getMinutes(), t.getSeconds()].map(n => String(n).padStart(2, '0')).join(':');
+  ttsLogLines.push(ts + ' ' + line);
+  if (ttsLogLines.length > TTS_LOG_MAX) ttsLogLines.splice(0, ttsLogLines.length - TTS_LOG_MAX);
+  console.log('[TTS]', line);
+}
+const waitMs = (ms) => new Promise(r => setTimeout(r, ms));
 const UNIT_AIVIS_MAX_CHARS = 2800;   // Aivis APIの上限3,000文字に余裕をみる
 const UNIT_AIVIS_BITRATE = 64;
 const UNIT_CACHE_MAX_BYTES = 300 * 1024 * 1024; // これを超えたら古いものから消す
@@ -3004,15 +3025,32 @@ function resolveUnit(unit, sess) {
     if (blob) {
       sess.fromCache++;
     } else {
-      blob = await synthUnitBlob(unit);
+      try {
+        blob = await synthUnitBlob(unit);
+      } catch (e) {
+        if (unit.type === 'batch') {
+          // まとめて作れなかった話者は1行ずつに切り替える（何度もまとめ生成を試さない）
+          ttsLog('[まとめ生成] ' + unit.speaker + ' の' + unit.segmentIndexes.length + '行を作れませんでした → 1行ずつ作ります: ' + e.message.slice(0, 100));
+          throw new BatchSplitError('synth failed: ' + e.message);
+        }
+        throw e;
+      }
       sess.synthesized++;
       await UnitCache.put(unit.key, blob, { engine: unit.engine, voiceId: unit.voiceId, type: unit.type, chars: unit.text.length, speaker: unit.speaker });
     }
     if (unit.type !== 'batch') return { blob };
-    const buffer = await decodeBlob(blob);
-    const slices = splitBySilence(buffer);
+    let buffer, slices;
+    try {
+      buffer = await decodeBlob(blob);
+      slices = splitBySilence(buffer);
+    } catch (e) {
+      ttsLog('[まとめ生成] ' + unit.speaker + ' の音声を読めませんでした → 1行ずつ作ります: ' + (e && e.message ? e.message.slice(0, 100) : e));
+      UnitCache.del(unit.key);
+      throw new BatchSplitError('decode failed');
+    }
+    ttsLog('[まとめ生成] ' + unit.speaker + ' ' + unit.segmentIndexes.length + '行 → 切れ端' + slices.length + '個（' + buffer.duration.toFixed(1) + '秒）');
     if (slices.length !== unit.segmentIndexes.length) {
-      console.warn('[まとめ生成] 切り分け数が合いません（' + slices.length + ' != ' + unit.segmentIndexes.length + '）。1行ずつ作り直します');
+      ttsLog('[まとめ生成] 切り分け数が合わないので、' + unit.speaker + ' は1行ずつ作り直します');
       UnitCache.del(unit.key); // 使えない音声は残さない
       throw new BatchSplitError('split mismatch');
     }
@@ -3260,7 +3298,7 @@ async function speakMultiEngine(plan, myToken) {
     statusEl.textContent = lastStatusLines.join('\n');
   }
   function dbg(msg) {
-    console.log('[TTS]', msg);
+    ttsLog(msg);
   }
 
   try {
@@ -3430,7 +3468,7 @@ async function speakMultiEngine(plan, myToken) {
       updateSpeakBtns();
       const saved = `キャッシュ${sess.fromCache}・新規${sess.synthesized}`;
       if (failures.length > 0) {
-        setStatus(`✓ 再生終了（${failures.length}/${plan.length}個が生成失敗・${saved}）`);
+        setStatus(`✓ 再生終了（${failures.length}/${plan.length}個が生成失敗・${saved}）\n${failures[0]}\n（設定タブの「音声の直近ログ」に詳細）`);
       } else {
         setStatus(`✓ 最後まで再生しました（全${plan.length}個・${saved}）`);
         setTimeout(() => { if (statusEl && !state.speaking) statusEl.style.display = 'none'; }, 4000);
@@ -3488,6 +3526,29 @@ async function synthGoogleToDataUrl(text, voiceId) {
 
 // Aivis Cloud TTS：単一セグメントをblob URLとして返す
 // 日本国内サーバー、最速0.3秒、CORS対応で直接ブラウザから叩ける（プロキシ不要）
+// Aivis の1分あたりの上限（定額は10回）。手前で待って 429 を避ける
+const AIVIS_WINDOW_MS = 60 * 1000;
+const AIVIS_WINDOW_LIMIT = 9;
+const aivisCallTimes = [];
+async function waitAivisSlot() {
+  for (;;) {
+    const now = Date.now();
+    while (aivisCallTimes.length && now - aivisCallTimes[0] > AIVIS_WINDOW_MS) aivisCallTimes.shift();
+    if (aivisCallTimes.length < AIVIS_WINDOW_LIMIT) { aivisCallTimes.push(now); return; }
+    const wait = AIVIS_WINDOW_MS - (now - aivisCallTimes[0]) + 300;
+    ttsLog('Aivis 1分の上限（' + AIVIS_WINDOW_LIMIT + '回）に達したので ' + Math.ceil(wait / 1000) + '秒待ちます');
+    await waitMs(wait);
+  }
+}
+// 429 のとき何秒待つか（ヘッダが読めなければ20秒）
+function aivisRetryAfterSec(res) {
+  const ra = parseFloat(res.headers.get('Retry-After') || '');
+  if (ra > 0 && ra < 600) return ra;
+  const rs = parseFloat(res.headers.get('X-Aivis-RateLimit-Requests-Reset') || '');
+  if (rs > 0 && rs < 600) return rs;
+  if (rs > 1e9) return Math.max(1, rs - Date.now() / 1000);
+  return 20;
+}
 async function synthAivisToBlobUrl(text, modelUuid, opts) {
   if (!modelUuid) throw new Error('Aivis: モデルUUIDが未設定');
   opts = opts || {};
@@ -3501,25 +3562,49 @@ async function synthAivisToBlobUrl(text, modelUuid, opts) {
   };
   // まとめ生成：改行ごとにこの秒数の無音を入れる（ブラウザ側で無音を目印に切り分ける）
   if (opts.gap) body.line_break_silence_seconds = opts.gap;
-  let res;
-  try {
-    res = await fetch('https://api.aivis-project.com/v1/tts/synthesize', {
-      method: 'POST',
-      headers: {
-        'Authorization': 'Bearer ' + state.aivisKey,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    });
-  } catch (netErr) {
-    throw new Error('Aivis ネットワーク失敗: ' + netErr.message);
+  const MAX_TRY = 3;
+  let lastErr = null;
+  for (let attempt = 0; attempt < MAX_TRY; attempt++) {
+    await waitAivisSlot();
+    let res;
+    try {
+      res = await fetch('https://api.aivis-project.com/v1/tts/synthesize', {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer ' + state.aivisKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+        signal: (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) ? AbortSignal.timeout(90000) : undefined,
+      });
+    } catch (netErr) {
+      // ブラウザから直接呼ぶため、混雑（429）などがCORSの都合で「ネットワーク失敗」に見えることがある → 少し待って再試行
+      lastErr = new Error('Aivis ネットワーク失敗: ' + netErr.message);
+      ttsLog(lastErr.message + '（' + (attempt + 1) + '/' + MAX_TRY + '）');
+      if (attempt < MAX_TRY - 1) { await waitMs(15000); continue; }
+      throw lastErr;
+    }
+    if (res.status === 429) {
+      const sec = Math.min(aivisRetryAfterSec(res), 70);
+      lastErr = new Error('Aivis HTTP 429: いま混んでいます');
+      ttsLog('Aivis 429（1分の上限）。' + Math.ceil(sec) + '秒待って再試行（' + (attempt + 1) + '/' + MAX_TRY + '）');
+      if (attempt < MAX_TRY - 1) { await waitMs(sec * 1000 + 500); continue; }
+      throw lastErr;
+    }
+    if (!res.ok) {
+      const err = await res.text();
+      const e = new Error('Aivis HTTP ' + res.status + ': ' + err.slice(0, 300));
+      ttsLog(e.message.slice(0, 160));
+      throw e;
+    }
+    const billing = res.headers.get('X-Aivis-Billing-Mode');
+    const remaining = res.headers.get('X-Aivis-RateLimit-Requests-Remaining');
+    ttsLog('Aivis OK ' + text.length + '文字' + (opts.gap ? '（まとめ）' : '') + (billing ? ' billing=' + billing : '') + (remaining !== null ? ' 残り' + remaining + '回/分' : ''));
+    if (billing === 'PayAsYouGo') ttsLog('⚠ Aivis が従量課金モードで動いています（定額のキーか確認してください）');
+    const blob = await res.blob();
+    return URL.createObjectURL(blob);
   }
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error('Aivis HTTP ' + res.status + ': ' + err.slice(0, 300));
-  }
-  const blob = await res.blob();
-  return URL.createObjectURL(blob);
+  throw lastErr || new Error('Aivis: 失敗');
 }
 
 // Fish Audio TTS：単一セグメントをblob URLとして返す
@@ -5096,6 +5181,19 @@ document.getElementById('backup-file').addEventListener('change', async (e) => {
   }
 });
 
+function renderTtsLog() {
+  const el = document.getElementById('tts-log-view');
+  if (el) el.value = ttsLogLines.length ? ttsLogLines.join('\n') : '（まだログはありません。よみあげや音声の保存をすると、ここに流れます）';
+}
+document.getElementById('tts-log-details').addEventListener('toggle', (e) => { if (e.target.open) renderTtsLog(); });
+document.getElementById('tts-log-refresh').addEventListener('click', renderTtsLog);
+document.getElementById('tts-log-clear').addEventListener('click', () => { ttsLogLines.length = 0; renderTtsLog(); });
+document.getElementById('tts-log-copy').addEventListener('click', async () => {
+  const text = ttsLogLines.join('\n');
+  try { await navigator.clipboard.writeText(text); alert('ログをコピーしました'); }
+  catch (_) { const el = document.getElementById('tts-log-view'); el.focus(); el.select(); alert('コピーできなかったので、文章を選択しました。長押しでコピーしてください'); }
+});
+
 document.getElementById('unit-cache-clear-btn').addEventListener('click', async () => {
   if (!confirm('音声キャッシュを消しますか？\n（次のよみあげで作り直すので、そのぶんクレジットを使います）')) return;
   try { await UnitCache.clear(); } catch (_) {}
@@ -5256,6 +5354,7 @@ async function exportStoryAudio(story, onProgress) {
   if (!audioPlan) audioPlan = await fallbackAudioPlan(story);
   const plan = audioPlan.segments;
   const sess = newUnitSession(); // よみあげで作った音声はキャッシュにあるので、ここでは作り直さない
+  const reasons = [];
   const parts = new Array(plan.length).fill(null);
   const queue = plan.map((seg, i) => ({ seg, i }));
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -5275,7 +5374,8 @@ async function exportStoryAudio(story, onProgress) {
           const is429 = /429|rate limit|Too many/i.test(e.message);
           if (is429 && a < 3) { await sleep(3000 * (a + 1)); continue; }
           failed++;
-          console.warn('[書き出し] セグメント' + (i + 1) + '失敗:', e.message);
+          reasons.push('#' + (i + 1) + ' ' + seg.speaker + ': ' + e.message.slice(0, 90));
+          ttsLog('[書き出し] #' + (i + 1) + ' ' + seg.speaker + ' 失敗: ' + e.message.slice(0, 120));
           break;
         }
       }
@@ -5288,6 +5388,12 @@ async function exportStoryAudio(story, onProgress) {
 
   const good = parts.filter(Boolean);
   if (!good.length) throw new Error('音声を作れませんでした（APIキーと通信状況を確認してください）');
+  // 歯抜けの音声を保存しても困るので、失敗があれば保存しない。作れた分はキャッシュに残るので、もう一度押せば続きから
+  if (failed > 0) {
+    throw new Error(failed + '/' + plan.length + '行の音声を作れなかったので、保存していません。\n' +
+      'もう一度押すと、作れた分はキャッシュから使うので続きだけ作ります。\n\n' +
+      reasons.slice(0, 3).join('\n') + (reasons.length > 3 ? '\n…（設定タブの「音声の直近ログ」に全部あります）' : ''));
+  }
   // タグを除去して1本にまとめる（途中で止まらないファイルにするため）
   const blob = await buildSingleAudio(good, (msg) => { if (onProgress) onProgress(-1, 0, msg); });
   await AudioStore.put(story.id, {
