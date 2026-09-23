@@ -762,7 +762,7 @@ textarea#fixed-theme {
     </div>
 
     <div style="text-align:center;color:var(--dim);font-size:11px;margin-top:32px">
-      よみきかせの星 v1.9.4（定額の枠超えは待って再開・回数を再読み込み後も引き継ぐ）<br>
+      よみきかせの星 v1.9.5（402は「従量キー」と判定して案内・未保存キーの警告）<br>
       作：しょーたろー
     </div>
   </div>
@@ -3780,21 +3780,13 @@ async function synthAivisToBlobUrl(text, modelUuid, opts) {
       if (attempt < MAX_TRY - 1) { await waitWithNotice('Aivisの混雑', sec * 1000 + 500); continue; }
       throw lastErr;
     }
-    if (res.status === 402 && (lastAivisBilling === 'Subscription' || res.headers.get('X-Aivis-RateLimit-Requests-Remaining') === '0')) {
-      // 定額なのに「残高不足」＝1分10回を超えた分が従量（追加使用量）に回って断られた。次の1分まで待って再試行
-      const nowSec = Math.floor(Date.now() / 1000);
-      const sec = 60 - (nowSec % 60) + 1;
-      markAivisWindowFull(sec * 1000);
-      lastErr = new Error('Aivis HTTP 402: 定額の1分10回を超えました（Aivisの「追加使用量」がオンで、クレジット残高がありません）');
-      ttsLog('Aivis 402（定額の枠超え・追加使用量がオン）。' + sec + '秒待って再試行（' + (attempt + 1) + '/' + MAX_TRY + '）');
-      if (attempt < MAX_TRY - 1) { await waitWithNotice('Aivisの回数制限（1分10回）', sec * 1000); continue; }
-      throw lastErr;
-    }
     if (res.status === 402 || res.status === 401 || res.status === 403) {
-      // 待っても直らない失敗。すぐ止めて、設定を直してもらう
+      // 待っても直らない失敗。すぐ止めて、設定を直してもらう。
+      // Aivis の課金モードは API キーごと（PayAsYouGo / Subscription）。定額キーは枠を超えても 429 であり 402 にはならない
       const err = await res.text();
       const why = res.status === 402
-        ? 'Aivisのクレジット残高が足りません。いま設定されているAPIキーは従量課金（クレジット消費）で動いています。\n定額プランのキーに差し替えるか、クレジットを追加してください（設定タブ → Aivis Cloud APIキー → 設定を保存）。'
+        ? 'Aivisが「クレジット残高不足」を返しました。いま保存されているAPIキー（' + String(state.aivisKey).slice(0, 6) + '…' + String(state.aivisKey).slice(-4) + '）は従量課金のキーです。\n' +
+          'Aivisでは課金モードがAPIキーごとに決まります。定額（Subscription）のキーを設定タブの「Aivis Cloud APIキー」に貼り、「🔎 このキーの課金モードを確認」で ✅ を確かめてから「設定を保存」を押してください。'
         : (res.status === 401 ? 'AivisのAPIキーが無効です。設定タブで確認してください。' : 'AivisのAPIキーに権限がありません。');
       ttsLog('Aivis HTTP ' + res.status + ': ' + err.slice(0, 160));
       const e = new Error(why + '\n' + err.slice(0, 160));
@@ -5415,16 +5407,18 @@ async function checkAivisKey() {
     const billing = res.headers.get('X-Aivis-Billing-Mode');
     const remaining = res.headers.get('X-Aivis-RateLimit-Requests-Remaining');
     let color = 'var(--success)', msg;
-    if (billing) noteAivisBilling(billing);
-    if (res.status === 402 && lastAivisBilling === 'Subscription') { color = 'var(--gold)'; msg = '⚠ 定額のキーですが、いま1分10回の枠を超えていて、超えた分が従量（追加使用量）に回って残高不足になっています（キー ' + keyTail + '）。1分待つと戻ります。Aivisの管理画面で「追加使用量」をオフにすると、超えた分は待つだけになります。'; }
-    else if (res.status === 402) { color = 'var(--danger)'; msg = '❌ 残高不足（402）：このキー（' + keyTail + '）は従量課金として扱われていて、クレジットがありません。定額プランを契約したアカウントで作ったキーか、そのアカウントで定額が有効になっているか確認してください。'; }
+    if (res.ok && billing) noteAivisBilling(billing);
+    const unsaved = key !== (state.aivisKey || '');
+    if (res.status === 402) { color = 'var(--danger)'; msg = '❌ このキー（' + keyTail + '）は従量課金（PayAsYouGo）のキーで、クレジットがありません。Aivisでは課金モードがキーごとに決まります。Aivisの管理画面の「APIキー」で定額（Subscription）のキーを作り、そのキーを貼ってください。'; }
     else if (res.status === 401) { color = 'var(--danger)'; msg = '❌ このキー（' + keyTail + '）は無効です（401）'; }
     else if (res.status === 429) { color = 'var(--gold)'; msg = '⚠ いま混んでいます（429）。1分ほど待ってからもう一度押してください'; }
     else if (!res.ok) { color = 'var(--danger)'; msg = '❌ HTTP ' + res.status + ': ' + (await res.text()).slice(0, 120); }
     else if (billing === 'Subscription') { msg = '✅ 定額プランで動いています（キー ' + keyTail + (remaining !== null ? '、残り' + remaining + '回/分' : '') + '）'; }
     else if (billing === 'PayAsYouGo') { color = 'var(--gold)'; msg = '⚠ 従量課金（クレジット消費）で動いています（キー ' + keyTail + '）。定額プランがこのキーのアカウントで有効になっていません'; }
     else { msg = '✅ 使えるキーです（キー ' + keyTail + '）。課金モードのヘッダは読めませんでしたが、残高不足ではありません'; }
+    if (unsaved) msg += '\n⚠ この欄のキーはまだ保存されていません。よみあげに使うには、下の「設定を保存」を押してください（保存済み：' + (state.aivisKey ? String(state.aivisKey).slice(0, 6) + '…' + String(state.aivisKey).slice(-4) : 'なし') + '）';
     out.style.color = color;
+    out.style.whiteSpace = 'pre-wrap';
     out.textContent = msg;
     ttsLog('キー確認: HTTP ' + res.status + (billing ? ' billing=' + billing : '') + (remaining !== null ? ' 残り' + remaining : ''));
   } catch (e) {
