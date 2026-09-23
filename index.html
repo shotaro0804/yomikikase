@@ -342,6 +342,8 @@ textarea#fixed-theme {
   color: var(--accent-light);
 }
 .tts-btn:disabled { opacity: .45; cursor: not-allowed; }
+/* 音声の保存ボタンは進捗や待機の理由を出すので、折り返してよい */
+#audio-status .tts-btn, #modal-audio-status .tts-btn { white-space: normal; line-height: 1.5; }
 .edit-msg { font-size: 12px; color: var(--success); }
 
 /* 修正モード */
@@ -753,7 +755,7 @@ textarea#fixed-theme {
     </div>
 
     <div style="text-align:center;color:var(--dim);font-size:11px;margin-top:32px">
-      よみきかせの星 v1.9（待機中の理由表示・まとめ生成の切り分け改善）<br>
+      よみきかせの星 v1.9.1（待機表示の折り返し）<br>
       作：しょーたろー
     </div>
   </div>
@@ -2628,7 +2630,7 @@ async function previewEditLine(ctx, seg, btn) {
   const rate = parseFloat(document.getElementById('rate').value) || 0.85;
   const detachWait = attachWaitCountdown(info => {
     if (linePreview.btn !== btn || !btn.disabled) return;
-    btn.textContent = info.waiting ? '⏸ あと' + info.secondsLeft + '秒（' + info.reason + '）' : '⏳ 生成中…';
+    btn.textContent = info.waiting ? '⏸ あと' + info.secondsLeft + '秒' : '⏳ 生成中…';
   });
   const finish = () => {
     detachWait();
@@ -3423,7 +3425,7 @@ async function speakMultiEngine(plan, myToken) {
     statusEl.textContent = lastStatusLines.join('\n');
   }
   const detachWait = attachWaitCountdown(info => {
-    if (info.waiting) setWaitLine(`⏸ ${info.reason}、あと${info.secondsLeft}秒待ってから続けます`);
+    if (info.waiting) setWaitLine(`⏸ ${info.reason}のため、あと${info.secondsLeft}秒待ってから続けます`);
     else if (lastStatusLines.length && lastStatusLines[lastStatusLines.length - 1].startsWith('⏸')) setStatus('▶ 再開しました');
   });
   function dbg(msg) {
@@ -3668,7 +3670,7 @@ async function waitAivisSlot() {
     if (aivisCallTimes.length < AIVIS_WINDOW_LIMIT) { aivisCallTimes.push(now); return; }
     const wait = AIVIS_WINDOW_MS - (now - aivisCallTimes[0]) + 300;
     ttsLog('Aivis 1分の上限（' + AIVIS_WINDOW_LIMIT + '回）に達したので ' + Math.ceil(wait / 1000) + '秒待ちます');
-    await waitWithNotice('Aivisの1分あたりの回数制限のため', wait);
+    await waitWithNotice('Aivisの回数制限（1分10回）', wait);
   }
 }
 // 429 のとき何秒待つか（ヘッダが読めなければ20秒）
@@ -3712,14 +3714,14 @@ async function synthAivisToBlobUrl(text, modelUuid, opts) {
       // ブラウザから直接呼ぶため、混雑（429）などがCORSの都合で「ネットワーク失敗」に見えることがある → 少し待って再試行
       lastErr = new Error('Aivis ネットワーク失敗: ' + netErr.message);
       ttsLog(lastErr.message + '（' + (attempt + 1) + '/' + MAX_TRY + '）');
-      if (attempt < MAX_TRY - 1) { await waitWithNotice('Aivisとの通信に失敗したため', 15000); continue; }
+      if (attempt < MAX_TRY - 1) { await waitWithNotice('Aivisとの通信失敗', 15000); continue; }
       throw lastErr;
     }
     if (res.status === 429) {
       const sec = Math.min(aivisRetryAfterSec(res), 70);
       lastErr = new Error('Aivis HTTP 429: いま混んでいます');
       ttsLog('Aivis 429（1分の上限）。' + Math.ceil(sec) + '秒待って再試行（' + (attempt + 1) + '/' + MAX_TRY + '）');
-      if (attempt < MAX_TRY - 1) { await waitWithNotice('Aivisが混み合っているため', sec * 1000 + 500); continue; }
+      if (attempt < MAX_TRY - 1) { await waitWithNotice('Aivisの混雑', sec * 1000 + 500); continue; }
       throw lastErr;
     }
     if (!res.ok) {
@@ -5622,7 +5624,7 @@ async function refreshAudioStatus(story, elId, ctx) {
 function attachExportCountdown(btn) {
   return attachWaitCountdown(info => {
     const prog = btn.dataset.progress || '';
-    if (info.waiting) btn.textContent = '⏸ ' + info.reason + '待機中… あと' + info.secondsLeft + '秒で再開' + (prog ? '（' + prog + '）' : '');
+    if (info.waiting) btn.textContent = '⏸ ' + info.reason + 'のため待機中… あと' + info.secondsLeft + '秒で再開' + (prog ? '（' + prog + '）' : '');
     else if (btn.disabled) btn.textContent = '⏳ 音声を作成中…' + (prog ? ' ' + prog : '');
   });
 }
