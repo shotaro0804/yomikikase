@@ -762,7 +762,7 @@ textarea#fixed-theme {
     </div>
 
     <div style="text-align:center;color:var(--dim);font-size:11px;margin-top:32px">
-      よみきかせの星 v1.9.3（残高不足・キー無効はすぐ止めて案内）<br>
+      よみきかせの星 v1.9.4（定額の枠超えは待って再開・回数を再読み込み後も引き継ぐ）<br>
       作：しょーたろー
     </div>
   </div>
@@ -3698,12 +3698,31 @@ async function synthGoogleToDataUrl(text, voiceId) {
 // Aivis の1分あたりの上限（定額は10回）。手前で待って 429 を避ける
 const AIVIS_WINDOW_MS = 60 * 1000;
 const AIVIS_WINDOW_LIMIT = 9;
-const aivisCallTimes = [];
+// 直近1分の呼び出し時刻。再読み込みしても引き継ぐ（開き直した直後に一気に呼んで枠を超えないように）
+const aivisCallTimes = (() => {
+  try { return JSON.parse(appStore.getItem('yk_aivis_calls') || '[]').filter(t => Date.now() - t < 60 * 1000); } catch (_) { return []; }
+})();
+function saveAivisCalls() { try { appStore.setItem('yk_aivis_calls', JSON.stringify(aivisCallTimes.slice(-20))); } catch (_) {} }
+// 直近の応答で分かった課金モード（Subscription＝定額 / PayAsYouGo＝従量）。キー確認ボタンや合成成功時に更新
+let lastAivisBilling = appStore.getItem('yk_aivis_billing') || null;
+function noteAivisBilling(mode) {
+  if (!mode) return;
+  lastAivisBilling = mode;
+  try { appStore.setItem('yk_aivis_billing', mode); } catch (_) {}
+}
+// 枠を超えた（402/429）と分かったら、他の生成も待つようにカウンタを満杯にする。
+// untilMs 後に枠が空くよう時刻をずらして入れる（自分の待ちと二重に待たないため）
+function markAivisWindowFull(untilMs) {
+  const t = Date.now() - (AIVIS_WINDOW_MS - Math.max(0, untilMs || AIVIS_WINDOW_MS));
+  aivisCallTimes.length = 0;
+  for (let i = 0; i < AIVIS_WINDOW_LIMIT; i++) aivisCallTimes.push(t);
+  saveAivisCalls();
+}
 async function waitAivisSlot() {
   for (;;) {
     const now = Date.now();
     while (aivisCallTimes.length && now - aivisCallTimes[0] > AIVIS_WINDOW_MS) aivisCallTimes.shift();
-    if (aivisCallTimes.length < AIVIS_WINDOW_LIMIT) { aivisCallTimes.push(now); return; }
+    if (aivisCallTimes.length < AIVIS_WINDOW_LIMIT) { aivisCallTimes.push(now); saveAivisCalls(); return; }
     const wait = AIVIS_WINDOW_MS - (now - aivisCallTimes[0]) + 300;
     ttsLog('Aivis 1分の上限（' + AIVIS_WINDOW_LIMIT + '回）に達したので ' + Math.ceil(wait / 1000) + '秒待ちます');
     await waitWithNotice('Aivisの回数制限（1分10回）', wait);
@@ -3755,9 +3774,20 @@ async function synthAivisToBlobUrl(text, modelUuid, opts) {
     }
     if (res.status === 429) {
       const sec = Math.min(aivisRetryAfterSec(res), 70);
+      markAivisWindowFull(sec * 1000);
       lastErr = new Error('Aivis HTTP 429: いま混んでいます');
       ttsLog('Aivis 429（1分の上限）。' + Math.ceil(sec) + '秒待って再試行（' + (attempt + 1) + '/' + MAX_TRY + '）');
       if (attempt < MAX_TRY - 1) { await waitWithNotice('Aivisの混雑', sec * 1000 + 500); continue; }
+      throw lastErr;
+    }
+    if (res.status === 402 && (lastAivisBilling === 'Subscription' || res.headers.get('X-Aivis-RateLimit-Requests-Remaining') === '0')) {
+      // 定額なのに「残高不足」＝1分10回を超えた分が従量（追加使用量）に回って断られた。次の1分まで待って再試行
+      const nowSec = Math.floor(Date.now() / 1000);
+      const sec = 60 - (nowSec % 60) + 1;
+      markAivisWindowFull(sec * 1000);
+      lastErr = new Error('Aivis HTTP 402: 定額の1分10回を超えました（Aivisの「追加使用量」がオンで、クレジット残高がありません）');
+      ttsLog('Aivis 402（定額の枠超え・追加使用量がオン）。' + sec + '秒待って再試行（' + (attempt + 1) + '/' + MAX_TRY + '）');
+      if (attempt < MAX_TRY - 1) { await waitWithNotice('Aivisの回数制限（1分10回）', sec * 1000); continue; }
       throw lastErr;
     }
     if (res.status === 402 || res.status === 401 || res.status === 403) {
@@ -3779,6 +3809,7 @@ async function synthAivisToBlobUrl(text, modelUuid, opts) {
     }
     const billing = res.headers.get('X-Aivis-Billing-Mode');
     const remaining = res.headers.get('X-Aivis-RateLimit-Requests-Remaining');
+    noteAivisBilling(billing);
     ttsLog('Aivis OK ' + text.length + '文字' + (opts.gap ? '（まとめ）' : '') + (billing ? ' billing=' + billing : '') + (remaining !== null ? ' 残り' + remaining + '回/分' : ''));
     if (billing === 'PayAsYouGo') ttsLog('⚠ Aivis が従量課金モードで動いています（定額のキーか確認してください）');
     const blob = await res.blob();
@@ -5384,7 +5415,9 @@ async function checkAivisKey() {
     const billing = res.headers.get('X-Aivis-Billing-Mode');
     const remaining = res.headers.get('X-Aivis-RateLimit-Requests-Remaining');
     let color = 'var(--success)', msg;
-    if (res.status === 402) { color = 'var(--danger)'; msg = '❌ 残高不足（402）：このキー（' + keyTail + '）は従量課金として扱われていて、クレジットがありません。定額プランを契約したアカウントで作ったキーか、そのアカウントで定額が有効になっているか確認してください。'; }
+    if (billing) noteAivisBilling(billing);
+    if (res.status === 402 && lastAivisBilling === 'Subscription') { color = 'var(--gold)'; msg = '⚠ 定額のキーですが、いま1分10回の枠を超えていて、超えた分が従量（追加使用量）に回って残高不足になっています（キー ' + keyTail + '）。1分待つと戻ります。Aivisの管理画面で「追加使用量」をオフにすると、超えた分は待つだけになります。'; }
+    else if (res.status === 402) { color = 'var(--danger)'; msg = '❌ 残高不足（402）：このキー（' + keyTail + '）は従量課金として扱われていて、クレジットがありません。定額プランを契約したアカウントで作ったキーか、そのアカウントで定額が有効になっているか確認してください。'; }
     else if (res.status === 401) { color = 'var(--danger)'; msg = '❌ このキー（' + keyTail + '）は無効です（401）'; }
     else if (res.status === 429) { color = 'var(--gold)'; msg = '⚠ いま混んでいます（429）。1分ほど待ってからもう一度押してください'; }
     else if (!res.ok) { color = 'var(--danger)'; msg = '❌ HTTP ' + res.status + ': ' + (await res.text()).slice(0, 120); }
