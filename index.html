@@ -753,7 +753,7 @@ textarea#fixed-theme {
     </div>
 
     <div style="text-align:center;color:var(--dim);font-size:11px;margin-top:32px">
-      よみきかせの星 v1.8（音声生成の安定化・音声ログ）<br>
+      よみきかせの星 v1.9（待機中の理由表示・まとめ生成の切り分け改善）<br>
       作：しょーたろー
     </div>
   </div>
@@ -2626,7 +2626,12 @@ async function previewEditLine(ctx, seg, btn) {
   btn.disabled = true;
   btn.textContent = '⏳ 生成中…';
   const rate = parseFloat(document.getElementById('rate').value) || 0.85;
+  const detachWait = attachWaitCountdown(info => {
+    if (linePreview.btn !== btn || !btn.disabled) return;
+    btn.textContent = info.waiting ? '⏸ あと' + info.secondsLeft + '秒（' + info.reason + '）' : '⏳ 生成中…';
+  });
   const finish = () => {
+    detachWait();
     if (linePreview.btn === btn) {
       btn.textContent = LINE_PREVIEW_LABEL;
       btn.disabled = false;
@@ -2648,6 +2653,7 @@ async function previewEditLine(ctx, seg, btn) {
       u.rate = rate;
       u.onend = finish;
       u.onerror = finish;
+      detachWait();
       btn.disabled = false;
       btn.textContent = '⏹ 止める';
       window.speechSynthesis.speak(u);
@@ -2676,6 +2682,7 @@ async function previewEditLine(ctx, seg, btn) {
     };
     audio.onended = done;
     audio.onerror = done;
+    detachWait();
     btn.disabled = false;
     btn.textContent = '⏹ 止める';
     try { await audio.play(); }
@@ -2778,6 +2785,37 @@ function ttsLog(line) {
   console.log('[TTS]', line);
 }
 const waitMs = (ms) => new Promise(r => setTimeout(r, ms));
+
+// --- 待ち時間の通知（上限待ち・混雑待ちの理由と残り秒数を画面に出す） ---
+const ttsWait = { active: new Map(), seq: 0, listeners: new Set() };
+function ttsWaitInfo() {
+  let best = null;
+  ttsWait.active.forEach(w => { if (!best || w.until > best.until) best = w; });
+  if (!best) return { waiting: false };
+  return { waiting: true, reason: best.reason, secondsLeft: Math.max(0, Math.ceil((best.until - Date.now()) / 1000)) };
+}
+function notifyTtsWait() {
+  const info = ttsWaitInfo();
+  ttsWait.listeners.forEach(fn => { try { fn(info); } catch (_) {} });
+}
+function onTtsWait(fn) { ttsWait.listeners.add(fn); return () => ttsWait.listeners.delete(fn); }
+async function waitWithNotice(reason, ms) {
+  const id = ++ttsWait.seq;
+  ttsWait.active.set(id, { reason, until: Date.now() + ms });
+  notifyTtsWait();
+  try { await waitMs(ms); }
+  finally { ttsWait.active.delete(id); notifyTtsWait(); }
+}
+// 進捗表示に「待機中… あとN秒」を出す共通部品。render(info) を1秒ごとに呼ぶ。戻り値は解除関数
+function attachWaitCountdown(render) {
+  let timer = null;
+  const off = onTtsWait(info => {
+    clearInterval(timer); timer = null;
+    if (info.waiting) { const tick = () => render(ttsWaitInfo()); tick(); timer = setInterval(tick, 1000); }
+    else render({ waiting: false });
+  });
+  return () => { clearInterval(timer); off(); };
+}
 const UNIT_AIVIS_MAX_CHARS = 2800;   // Aivis APIの上限3,000文字に余裕をみる
 const UNIT_AIVIS_BITRATE = 64;
 const UNIT_CACHE_MAX_BYTES = 300 * 1024 * 1024; // これを超えたら古いものから消す
@@ -2830,6 +2868,12 @@ const UnitCache = {
   },
   clear: () => AudioStore.unitClear(),
 };
+// 切り分けが合わなかった「まとめ」の鍵。次からは同じまとめを作らず、半分ずつに分けて計画する
+const badBatchKeys = new Set(JSON.parse(appStore.getItem('yk_bad_batches') || '[]'));
+function rememberBadBatch(key) {
+  badBatchKeys.add(key);
+  try { appStore.setItem('yk_bad_batches', JSON.stringify(Array.from(badBatchKeys).slice(-300))); } catch (_) {}
+}
 let unitPruning = false;
 async function pruneUnitCache() {
   if (unitPruning) return;
@@ -2921,18 +2965,28 @@ async function buildAudioPlan(story, segsOverride) {
     }
     // 2) 残りはまとめて1本（文字数の上限で分ける）。1行だけなら普通の1行ユニット
     let chunk = [], len = 0;
-    const flush = async () => {
-      if (!chunk.length) return;
-      if (chunk.length === 1) {
-        const line = chunk[0];
+    // 行の集まりを「まとめ」にする。以前に切り分けが合わなかったまとめなら、半分ずつに分けて計画する
+    const planLines = async (lines) => {
+      if (lines.length === 1) {
+        const line = lines[0];
         units.set(line.key, { key: line.key, type: 'single', engine: 'aivis', voiceId: g.voiceId, speaker: g.speaker, text: line.text, segmentIndexes: [line.i] });
         segments[line.i].sources.push({ key: line.key, slice: null });
-      } else {
-        const text = chunk.map(l => l.text).join('\n');
-        const key = await unitKeyOf('aivis', g.voiceId, aivisParams + '|gap' + UNIT_GAP_SECONDS, text);
-        units.set(key, { key, type: 'batch', engine: 'aivis', voiceId: g.voiceId, speaker: g.speaker, text, segmentIndexes: chunk.map(l => l.i), lines: chunk.slice() });
-        chunk.forEach((l, n) => segments[l.i].sources.push({ key, slice: n }));
+        return;
       }
+      const text = lines.map(l => l.text).join('\n');
+      const key = await unitKeyOf('aivis', g.voiceId, aivisParams + '|gap' + UNIT_GAP_SECONDS, text);
+      if (badBatchKeys.has(key)) {
+        const mid = Math.ceil(lines.length / 2);
+        await planLines(lines.slice(0, mid));
+        await planLines(lines.slice(mid));
+        return;
+      }
+      units.set(key, { key, type: 'batch', engine: 'aivis', voiceId: g.voiceId, speaker: g.speaker, text, segmentIndexes: lines.map(l => l.i), lines: lines.slice() });
+      lines.forEach((l, n) => segments[l.i].sources.push({ key, slice: n }));
+    };
+    const flush = async () => {
+      if (!chunk.length) return;
+      await planLines(chunk);
       chunk = [];
       len = 0;
     };
@@ -2981,8 +3035,8 @@ async function decodeBlob(blob) {
   return await getUnitDecodeCtx().decodeAudioData(ab);
 }
 // 無音を目印に切り分ける。minSilenceSec 以上の無音だけを区切りとみなす
-function splitBySilence(buffer, minSilenceSec, thresholdDb) {
-  minSilenceSec = minSilenceSec || UNIT_SPLIT_MIN_SILENCE;
+// 10ms ごとに「音があるか」を並べる
+function loudFrames(buffer, thresholdDb) {
   thresholdDb = thresholdDb || -45;
   const data = buffer.getChannelData(0), sr = buffer.sampleRate, win = Math.floor(sr * 0.01), thr = Math.pow(10, thresholdDb / 20);
   const frames = Math.floor(data.length / win), loud = new Uint8Array(frames);
@@ -2991,6 +3045,15 @@ function splitBySilence(buffer, minSilenceSec, thresholdDb) {
     for (let i = f * win, e = i + win; i < e; i++) sum += data[i] * data[i];
     loud[f] = Math.sqrt(sum / win) > thr ? 1 : 0;
   }
+  return loud;
+}
+const SPLIT_PAD_SEC = 0.08;
+function framesToSlices(buffer, segs) {
+  return segs.map(([a, b]) => ({ start: Math.max(0, a * 0.01 - SPLIT_PAD_SEC), end: Math.min(buffer.duration, (b + 1) * 0.01 + SPLIT_PAD_SEC) }));
+}
+function splitBySilence(buffer, minSilenceSec, thresholdDb) {
+  minSilenceSec = minSilenceSec || UNIT_SPLIT_MIN_SILENCE;
+  const loud = loudFrames(buffer, thresholdDb), frames = loud.length;
   const minSil = Math.round(minSilenceSec / 0.01), segs = [];
   let s = -1, last = -1;
   for (let f = 0; f < frames; f++) {
@@ -3000,8 +3063,31 @@ function splitBySilence(buffer, minSilenceSec, thresholdDb) {
     last = f;
   }
   if (s >= 0) segs.push([s, last]);
-  const pad = 0.08;
-  return segs.map(([a, b]) => ({ start: Math.max(0, a * 0.01 - pad), end: Math.min(buffer.duration, (b + 1) * 0.01 + pad) }));
+  return framesToSlices(buffer, segs);
+}
+// 切れ端の数が合わないとき用：音と音の間の無音を長い順に n-1 個選んで区切る
+// （入れた無音は3秒なので、声の自然な間より必ず長いはず。無音が足りなければ null）
+function splitByTopGaps(buffer, n, minGapSec) {
+  minGapSec = minGapSec || 1.2;
+  const loud = loudFrames(buffer), frames = loud.length;
+  let first = -1, last = -1;
+  for (let f = 0; f < frames; f++) if (loud[f]) { if (first < 0) first = f; last = f; }
+  if (first < 0) return null;
+  const runs = [];
+  let inSil = false, silStart = 0;
+  for (let f = first; f <= last; f++) {
+    if (!loud[f]) { if (!inSil) { inSil = true; silStart = f; } }
+    else if (inSil) { runs.push({ start: silStart, end: f - 1, len: f - silStart }); inSil = false; }
+  }
+  const cands = runs.filter(r => r.len * 0.01 >= minGapSec);
+  if (cands.length < n - 1) return null;
+  cands.sort((a, b) => b.len - a.len);
+  const seps = cands.slice(0, n - 1).sort((a, b) => a.start - b.start);
+  const segs = [];
+  let cur = first;
+  for (const sp of seps) { segs.push([cur, sp.start - 1]); cur = sp.end + 1; }
+  segs.push([cur, last]);
+  return framesToSlices(buffer, segs);
 }
 const sliceBuf = (buffer, start, end) => buffer.getChannelData(0).slice(Math.floor(start * buffer.sampleRate), Math.min(buffer.length, Math.ceil(end * buffer.sampleRate)));
 function encodeWavSamples(samples, sampleRate) {
@@ -3050,8 +3136,14 @@ function resolveUnit(unit, sess) {
     }
     ttsLog('[まとめ生成] ' + unit.speaker + ' ' + unit.segmentIndexes.length + '行 → 切れ端' + slices.length + '個（' + buffer.duration.toFixed(1) + '秒）');
     if (slices.length !== unit.segmentIndexes.length) {
-      ttsLog('[まとめ生成] 切り分け数が合わないので、' + unit.speaker + ' は1行ずつ作り直します');
+      // 声の自然な間で余計に切れているだけなら、長い無音から順に区切り直せば合う
+      const alt = splitByTopGaps(buffer, unit.segmentIndexes.length);
+      if (alt) { ttsLog('[まとめ生成] 長い無音から順に区切り直して ' + alt.length + '個にしました'); slices = alt; }
+    }
+    if (slices.length !== unit.segmentIndexes.length) {
+      ttsLog('[まとめ生成] 切り分け数が合わないので、' + unit.speaker + ' は半分ずつに分けて作り直します');
       UnitCache.del(unit.key); // 使えない音声は残さない
+      rememberBadBatch(unit.key);
       throw new BatchSplitError('split mismatch');
     }
     return { blob, buffer, slices };
@@ -3065,32 +3157,56 @@ function resolveUnit(unit, sess) {
 }
 
 // 1セグメントぶんの再生用URLを返す（single→そのまま、batchの切れ端→WAV、複数人→重ねてWAV）
+// Aivis の行の集まりを用意する。まとめが使えなければ半分ずつに分けて再試行（最後は1行ずつ）。
+// 戻り値は行ごとの音（{ blob } または { samples, sampleRate }）の配列
+async function resolveAivisLines(lines, voiceId, speaker, sess) {
+  if (lines.length === 1) {
+    const line = lines[0];
+    const u = { key: line.key, type: 'single', engine: 'aivis', voiceId, speaker, text: line.text, segmentIndexes: [line.i] };
+    const r = await resolveUnit(u, sess);
+    return [{ blob: r.blob }];
+  }
+  const text = lines.map(l => l.text).join('\n');
+  const key = await unitKeyOf('aivis', voiceId, 'b' + UNIT_AIVIS_BITRATE + '|gap' + UNIT_GAP_SECONDS, text);
+  if (!badBatchKeys.has(key) && !sess.badBatches.has(key)) {
+    const u = { key, type: 'batch', engine: 'aivis', voiceId, speaker, text, segmentIndexes: lines.map(l => l.i), lines: lines.slice() };
+    try {
+      const r = await resolveUnit(u, sess);
+      return lines.map((_, n) => ({ samples: sliceBuf(r.buffer, r.slices[n].start, r.slices[n].end), sampleRate: r.buffer.sampleRate }));
+    } catch (e) {
+      if (!(e instanceof BatchSplitError)) throw e;
+      sess.badBatches.add(key);
+    }
+  }
+  const mid = Math.ceil(lines.length / 2);
+  ttsLog('[まとめ生成] ' + speaker + ' の' + lines.length + '行を ' + mid + '行＋' + (lines.length - mid) + '行に分けて作ります');
+  const halves = await Promise.all([
+    resolveAivisLines(lines.slice(0, mid), voiceId, speaker, sess),
+    resolveAivisLines(lines.slice(mid), voiceId, speaker, sess),
+  ]);
+  return halves[0].concat(halves[1]);
+}
+// 計画上の「まとめ」1つにつき1回だけ動かす（同じセッションの他のセグメントと共有）
+function resolveBatchGroup(unit, sess) {
+  const k = 'group:' + unit.key;
+  if (!sess.units.has(k)) {
+    const p = resolveAivisLines(unit.lines, unit.voiceId, unit.speaker, sess);
+    p.catch(() => sess.units.delete(k));
+    sess.units.set(k, p);
+  }
+  return sess.units.get(k);
+}
+
 async function resolveSegmentUrl(seg, plan, sess) {
   const parts = [];
   for (const src of seg.sources) {
     const unit = plan.units.get(src.key);
-    let r = null, useSingle = false;
-    if (unit.type === 'batch' && sess.badBatches.has(unit.key)) {
-      useSingle = true;
+    if (unit.type === 'batch') {
+      const lineParts = await resolveBatchGroup(unit, sess);
+      parts.push(lineParts[src.slice]);
     } else {
-      try { r = await resolveUnit(unit, sess); }
-      catch (e) { if (unit.type === 'batch' && e instanceof BatchSplitError) useSingle = true; else throw e; }
-    }
-    if (useSingle) {
-      // まとめ生成が使えなかった行は、1行ずつ作る（それも次からはキャッシュ）
-      const line = unit.lines[src.slice];
-      let su = plan.units.get(line.key);
-      if (!su) {
-        su = { key: line.key, type: 'single', engine: 'aivis', voiceId: unit.voiceId, speaker: unit.speaker, text: line.text, segmentIndexes: [line.i] };
-        plan.units.set(su.key, su);
-      }
-      r = await resolveUnit(su, sess);
+      const r = await resolveUnit(unit, sess);
       parts.push({ blob: r.blob });
-    } else if (src.slice === null) {
-      parts.push({ blob: r.blob });
-    } else {
-      const s = r.slices[src.slice];
-      parts.push({ samples: sliceBuf(r.buffer, s.start, s.end), sampleRate: r.buffer.sampleRate });
     }
   }
   if (parts.length === 1 && parts[0].blob) return URL.createObjectURL(parts[0].blob);
@@ -3297,6 +3413,19 @@ async function speakMultiEngine(plan, myToken) {
     if (lastStatusLines.length > 4) lastStatusLines = lastStatusLines.slice(-4);
     statusEl.textContent = lastStatusLines.join('\n');
   }
+  // 上限待ち・混雑待ちは、最後の行を置き換えながら残り秒数を出す
+  function setWaitLine(text) {
+    if (!statusEl) return;
+    statusEl.style.display = 'block';
+    const n = lastStatusLines.length;
+    if (n && lastStatusLines[n - 1].startsWith('⏸')) lastStatusLines[n - 1] = text;
+    else { lastStatusLines.push(text); if (lastStatusLines.length > 4) lastStatusLines = lastStatusLines.slice(-4); }
+    statusEl.textContent = lastStatusLines.join('\n');
+  }
+  const detachWait = attachWaitCountdown(info => {
+    if (info.waiting) setWaitLine(`⏸ ${info.reason}、あと${info.secondsLeft}秒待ってから続けます`);
+    else if (lastStatusLines.length && lastStatusLines[lastStatusLines.length - 1].startsWith('⏸')) setStatus('▶ 再開しました');
+  });
   function dbg(msg) {
     ttsLog(msg);
   }
@@ -3484,6 +3613,8 @@ async function speakMultiEngine(plan, myToken) {
       alert(e.message + '\n\n端末内蔵音声で代替再生します');
       speakBrowser(stripEmotionTags(plan.map(s => s.text).join('\n')));
     }
+  } finally {
+    detachWait();
   }
 }
 
@@ -3537,7 +3668,7 @@ async function waitAivisSlot() {
     if (aivisCallTimes.length < AIVIS_WINDOW_LIMIT) { aivisCallTimes.push(now); return; }
     const wait = AIVIS_WINDOW_MS - (now - aivisCallTimes[0]) + 300;
     ttsLog('Aivis 1分の上限（' + AIVIS_WINDOW_LIMIT + '回）に達したので ' + Math.ceil(wait / 1000) + '秒待ちます');
-    await waitMs(wait);
+    await waitWithNotice('Aivisの1分あたりの回数制限のため', wait);
   }
 }
 // 429 のとき何秒待つか（ヘッダが読めなければ20秒）
@@ -3581,14 +3712,14 @@ async function synthAivisToBlobUrl(text, modelUuid, opts) {
       // ブラウザから直接呼ぶため、混雑（429）などがCORSの都合で「ネットワーク失敗」に見えることがある → 少し待って再試行
       lastErr = new Error('Aivis ネットワーク失敗: ' + netErr.message);
       ttsLog(lastErr.message + '（' + (attempt + 1) + '/' + MAX_TRY + '）');
-      if (attempt < MAX_TRY - 1) { await waitMs(15000); continue; }
+      if (attempt < MAX_TRY - 1) { await waitWithNotice('Aivisとの通信に失敗したため', 15000); continue; }
       throw lastErr;
     }
     if (res.status === 429) {
       const sec = Math.min(aivisRetryAfterSec(res), 70);
       lastErr = new Error('Aivis HTTP 429: いま混んでいます');
       ttsLog('Aivis 429（1分の上限）。' + Math.ceil(sec) + '秒待って再試行（' + (attempt + 1) + '/' + MAX_TRY + '）');
-      if (attempt < MAX_TRY - 1) { await waitMs(sec * 1000 + 500); continue; }
+      if (attempt < MAX_TRY - 1) { await waitWithNotice('Aivisが混み合っているため', sec * 1000 + 500); continue; }
       throw lastErr;
     }
     if (!res.ok) {
@@ -5487,6 +5618,15 @@ async function refreshAudioStatus(story, elId, ctx) {
   }
 }
 
+// 書き出しボタンに、待機中の理由と残り秒数を出す
+function attachExportCountdown(btn) {
+  return attachWaitCountdown(info => {
+    const prog = btn.dataset.progress || '';
+    if (info.waiting) btn.textContent = '⏸ ' + info.reason + '待機中… あと' + info.secondsLeft + '秒で再開' + (prog ? '（' + prog + '）' : '');
+    else if (btn.disabled) btn.textContent = '⏳ 音声を作成中…' + (prog ? ' ' + prog : '');
+  });
+}
+
 function storyForCtx(ctx) {
   if (ctx === 'modal') {
     const id = document.getElementById('modal-bg').dataset.storyId;
@@ -5508,9 +5648,11 @@ document.addEventListener('click', async (e) => {
     if (state.speaking) stopSpeak();
     btn.disabled = true;
     const orig = btn.textContent;
+    const detach = attachExportCountdown(btn);
     try {
       const r = await exportStoryAudio(story, (d, t, msg) => {
         btn.textContent = msg ? msg : ('⏳ 音声を作成中… ' + d + '/' + t);
+        if (d >= 0) btn.dataset.progress = d + '/' + t;
       });
       await refreshAudioStatus(story, wrapId, ctx);
       if (r.failed) alert('保存しました（' + r.failed + '個の生成失敗をとばしています）');
@@ -5518,6 +5660,8 @@ document.addEventListener('click', async (e) => {
       alert('保存できませんでした\n' + err.message);
       btn.disabled = false;
       btn.textContent = orig;
+    } finally {
+      detach();
     }
   } else if (act === 'download') {
     const rec = await AudioStore.get(story.id).catch(() => null);
@@ -5541,16 +5685,20 @@ document.addEventListener('click', async (e) => {
     if (!confirm('音声を作り直しますか？（APIクレジットを使います）')) return;
     if (state.speaking) stopSpeak();
     btn.disabled = true;
+    const detach = attachExportCountdown(btn);
     try {
       await AudioStore.del(story.id).catch(() => {});
       const r = await exportStoryAudio(story, (d, t, msg) => {
         btn.textContent = msg ? msg : ('⏳ 音声を作成中… ' + d + '/' + t);
+        if (d >= 0) btn.dataset.progress = d + '/' + t;
       });
       await refreshAudioStatus(story, wrapId, ctx);
       if (r.failed) alert('作り直しました（' + r.failed + '個の生成失敗をとばしています）');
     } catch (err) {
       alert('作り直せませんでした\n' + err.message);
       await refreshAudioStatus(story, wrapId, ctx);
+    } finally {
+      detach();
     }
   } else if (act === 'catalog-dl') {
     const item = JSON.parse(btn.dataset.ykItem);
