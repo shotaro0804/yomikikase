@@ -671,6 +671,8 @@ textarea#fixed-theme {
         <a href="https://hub.aivis-project.com/cloud-api/api-keys" target="_blank" style="color:var(--accent-light)">hub.aivis-project.com/cloud-api/api-keys</a> で取得。<br>
         日本国内サーバー・最速0.3秒。従量：1万文字440円／定額：月1,980円（読み放題）。
       </div>
+      <button class="btn btn-secondary" id="aivis-check-btn" style="margin-top:8px;padding:8px 14px;font-size:13px">🔎 このキーの課金モードを確認（1文字だけ合成します）</button>
+      <div id="aivis-check-result" style="font-size:12px;line-height:1.6;margin-top:6px;display:none"></div>
     </div>
 
     <div class="input-wrap" id="aivis-voice-wrap" style="display:none">
@@ -760,7 +762,7 @@ textarea#fixed-theme {
     </div>
 
     <div style="text-align:center;color:var(--dim);font-size:11px;margin-top:32px">
-      よみきかせの星 v1.9.2（まとめ生成の失敗時は1行ずつに固定・設定でオフ可）<br>
+      よみきかせの星 v1.9.3（残高不足・キー無効はすぐ止めて案内）<br>
       作：しょーたろー
     </div>
   </div>
@@ -2886,6 +2888,12 @@ function rememberBadBatch(key) {
 }
 // まとめ生成が一度でも失敗した声（voiceId）。この端末では以後1行ずつ作る（失敗のたびに分割を試して回数を増やさない）
 const noBatchVoices = new Set(JSON.parse(appStore.getItem('yk_nobatch_voices') || '[]'));
+// v1.9.3：残高不足（402）の失敗で誤って「1行ずつ」にした記憶を、一度だけ消す
+if (appStore.getItem('yk_nobatch_reset_v193') !== '1') {
+  noBatchVoices.clear(); badBatchKeys.clear();
+  appStore.removeItem('yk_nobatch_voices'); appStore.removeItem('yk_bad_batches');
+  appStore.setItem('yk_nobatch_reset_v193', '1');
+}
 function rememberNoBatchVoice(voiceId, speaker) {
   if (noBatchVoices.has(voiceId)) return;
   noBatchVoices.add(voiceId);
@@ -3136,7 +3144,7 @@ function resolveUnit(unit, sess) {
       try {
         blob = await synthUnitBlob(unit);
       } catch (e) {
-        if (unit.type === 'batch') {
+        if (unit.type === 'batch' && !e.fatal) {
           // まとめて作れなかった話者は1行ずつに切り替える（何度もまとめ生成を試さない）
           ttsLog('[まとめ生成] ' + unit.speaker + ' の' + unit.segmentIndexes.length + '行を作れませんでした → 1行ずつ作ります: ' + e.message.slice(0, 100));
           throw new BatchSplitError('synth failed: ' + e.message);
@@ -3463,6 +3471,7 @@ async function speakMultiEngine(plan, myToken) {
     const audioUrls = new Array(plan.length); // 生成結果の格納(順序保持)
     const ready = new Array(plan.length).fill(false); // 各indexが完成したか
     const failures = [];
+    let fatalMsg = null; // 残高不足など、待っても直らない失敗
     let generationDone = false; // 全生成が終わったか
 
     // 1セグメントを生成する関数
@@ -3479,6 +3488,12 @@ async function speakMultiEngine(plan, myToken) {
           return;
         } catch (e) {
           lastErr = e;
+          if (e.fatal) {
+            fatalMsg = e.message;
+            failures.push(`#${i+1} ${seg.speaker}: ${e.message.split('\n')[0].slice(0, 80)}`);
+            for (let k = 0; k < ready.length; k++) if (!ready[k]) { audioUrls[k] = null; ready[k] = true; } // 残りを待たない
+            return;
+          }
           const is429 = /429|Too many|rate limit/i.test(e.message);
           dbg(`  #${i+1} ✗失敗(${attempt+1}/${MAX_RETRY}) ${e.message.slice(0,60)}`);
           if (is429 && attempt < MAX_RETRY - 1) {
@@ -3505,6 +3520,7 @@ async function speakMultiEngine(plan, myToken) {
       for (let w = 0; w < CONCURRENCY; w++) {
         workers.push((async () => {
           while (isCurrent()) {
+            if (fatalMsg) break;
             const task = queue.shift();
             if (!task) break;
             await synthOne(task.seg, task.i);
@@ -3616,6 +3632,7 @@ async function speakMultiEngine(plan, myToken) {
       state.audio = null;
       releaseWakeLock();
       updateSpeakBtns();
+      if (fatalMsg) { setStatus('✗ ' + fatalMsg.split('\n')[0]); alert(fatalMsg); }
       const saved = `キャッシュ${sess.fromCache}・新規${sess.synthesized}`;
       if (failures.length > 0) {
         setStatus(`✓ 再生終了（${failures.length}/${plan.length}個が生成失敗・${saved}）\n${failures[0]}\n（設定タブの「音声の直近ログ」に詳細）`);
@@ -3742,6 +3759,17 @@ async function synthAivisToBlobUrl(text, modelUuid, opts) {
       ttsLog('Aivis 429（1分の上限）。' + Math.ceil(sec) + '秒待って再試行（' + (attempt + 1) + '/' + MAX_TRY + '）');
       if (attempt < MAX_TRY - 1) { await waitWithNotice('Aivisの混雑', sec * 1000 + 500); continue; }
       throw lastErr;
+    }
+    if (res.status === 402 || res.status === 401 || res.status === 403) {
+      // 待っても直らない失敗。すぐ止めて、設定を直してもらう
+      const err = await res.text();
+      const why = res.status === 402
+        ? 'Aivisのクレジット残高が足りません。いま設定されているAPIキーは従量課金（クレジット消費）で動いています。\n定額プランのキーに差し替えるか、クレジットを追加してください（設定タブ → Aivis Cloud APIキー → 設定を保存）。'
+        : (res.status === 401 ? 'AivisのAPIキーが無効です。設定タブで確認してください。' : 'AivisのAPIキーに権限がありません。');
+      ttsLog('Aivis HTTP ' + res.status + ': ' + err.slice(0, 160));
+      const e = new Error(why + '\n' + err.slice(0, 160));
+      e.fatal = true;
+      throw e;
     }
     if (!res.ok) {
       const err = await res.text();
@@ -5333,6 +5361,48 @@ document.getElementById('backup-file').addEventListener('change', async (e) => {
   }
 });
 
+// 設定欄に入っているキーで1文字だけ合成し、定額（Subscription）か従量（PayAsYouGo）か、残高不足かを表示する
+async function checkAivisKey() {
+  const key = document.getElementById('aivis-key').value.trim();
+  const out = document.getElementById('aivis-check-result');
+  const btn = document.getElementById('aivis-check-btn');
+  out.style.display = 'block';
+  out.style.color = 'var(--dim)';
+  if (!key) { out.textContent = 'APIキーを入れてから押してください'; return; }
+  if (state.aivisVoices.length === 0) { try { await loadAivisModels(); } catch (_) {} }
+  const model = state.aivisVoice || (state.aivisVoices[0] && state.aivisVoices[0].voice_id);
+  if (!model) { out.textContent = '声のリストを読み込めませんでした（通信を確認してください）'; return; }
+  const keyTail = key.slice(0, 6) + '…' + key.slice(-4);
+  btn.disabled = true;
+  out.textContent = '⏳ 確認中…';
+  try {
+    const res = await fetch('https://api.aivis-project.com/v1/tts/synthesize', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model_uuid: model, text: 'あ', use_ssml: false, output_format: 'mp3', output_bitrate: 64, language: 'ja' }),
+    });
+    const billing = res.headers.get('X-Aivis-Billing-Mode');
+    const remaining = res.headers.get('X-Aivis-RateLimit-Requests-Remaining');
+    let color = 'var(--success)', msg;
+    if (res.status === 402) { color = 'var(--danger)'; msg = '❌ 残高不足（402）：このキー（' + keyTail + '）は従量課金として扱われていて、クレジットがありません。定額プランを契約したアカウントで作ったキーか、そのアカウントで定額が有効になっているか確認してください。'; }
+    else if (res.status === 401) { color = 'var(--danger)'; msg = '❌ このキー（' + keyTail + '）は無効です（401）'; }
+    else if (res.status === 429) { color = 'var(--gold)'; msg = '⚠ いま混んでいます（429）。1分ほど待ってからもう一度押してください'; }
+    else if (!res.ok) { color = 'var(--danger)'; msg = '❌ HTTP ' + res.status + ': ' + (await res.text()).slice(0, 120); }
+    else if (billing === 'Subscription') { msg = '✅ 定額プランで動いています（キー ' + keyTail + (remaining !== null ? '、残り' + remaining + '回/分' : '') + '）'; }
+    else if (billing === 'PayAsYouGo') { color = 'var(--gold)'; msg = '⚠ 従量課金（クレジット消費）で動いています（キー ' + keyTail + '）。定額プランがこのキーのアカウントで有効になっていません'; }
+    else { msg = '✅ 使えるキーです（キー ' + keyTail + '）。課金モードのヘッダは読めませんでしたが、残高不足ではありません'; }
+    out.style.color = color;
+    out.textContent = msg;
+    ttsLog('キー確認: HTTP ' + res.status + (billing ? ' billing=' + billing : '') + (remaining !== null ? ' 残り' + remaining : ''));
+  } catch (e) {
+    out.style.color = 'var(--danger)';
+    out.textContent = '❌ 通信に失敗しました: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+document.getElementById('aivis-check-btn').addEventListener('click', checkAivisKey);
+
 function renderBatchSetting() {
   const cb = document.getElementById('aivis-batch-toggle');
   if (cb) cb.checked = state.aivisBatch !== false;
@@ -5528,6 +5598,7 @@ async function exportStoryAudio(story, onProgress) {
   const plan = audioPlan.segments;
   const sess = newUnitSession(); // よみあげで作った音声はキャッシュにあるので、ここでは作り直さない
   const reasons = [];
+  let fatalErr = null;
   const parts = new Array(plan.length).fill(null);
   const queue = plan.map((seg, i) => ({ seg, i }));
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -5544,6 +5615,7 @@ async function exportStoryAudio(story, onProgress) {
           if (url.indexOf('blob:') === 0) URL.revokeObjectURL(url);
           break;
         } catch (e) {
+          if (e.fatal) { fatalErr = e; queue.length = 0; failed++; ttsLog('[書き出し] 中断: ' + e.message.split('\n')[0]); break; }
           const is429 = /429|rate limit|Too many/i.test(e.message);
           if (is429 && a < 3) { await sleep(3000 * (a + 1)); continue; }
           failed++;
@@ -5558,6 +5630,7 @@ async function exportStoryAudio(story, onProgress) {
     }
   }
   await Promise.all([worker(), worker()]);
+  if (fatalErr) throw new Error(fatalErr.message + '\n\n（作れた分はキャッシュに残っています。設定を直してから、もう一度押してください）');
 
   const good = parts.filter(Boolean);
   if (!good.length) throw new Error('音声を作れませんでした（APIキーと通信状況を確認してください）');
