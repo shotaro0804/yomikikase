@@ -307,6 +307,28 @@ textarea#theme {
   resize: vertical;
   line-height: 1.7;
 }
+textarea#fixed-theme {
+  min-height: 84px;
+  resize: vertical;
+  line-height: 1.7;
+  border-color: rgba(251,191,36,0.35);
+}
+
+/* 登場人物のパターン */
+.pattern-box {
+  margin-top: 12px;
+  background: rgba(0,0,0,0.2);
+  border: 1px dashed rgba(160,120,255,0.3);
+  border-radius: 10px;
+  padding: 10px;
+}
+.pattern-title { font-size: 12px; color: var(--accent-light); margin-bottom: 8px; }
+.pattern-title .pattern-hint { font-size: 10px; color: var(--dim); margin-left: 6px; }
+.pattern-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-bottom: 6px; }
+.pattern-row:last-child { margin-bottom: 0; }
+.pattern-row select { width: auto; flex: 1; min-width: 160px; padding: 7px 10px; font-size: 13px; }
+.pattern-row .mini-btn:disabled { opacity: .4; cursor: not-allowed; }
+.pattern-msg { font-size: 11px; color: var(--success); margin-top: 6px; }
 .field-hint { font-size: 11px; color: var(--dim); line-height: 1.6; margin-top: 6px; }
 
 /* 物語上部のツールバー（よみあげ・修正） */
@@ -427,6 +449,20 @@ textarea#theme {
       <div id="random-info" style="margin-top:6px;font-size:11px;color:var(--dim);line-height:1.5;display:none">
         💡 架空キャラは声を選ぶと、その声に合う性別・年齢の人物像をAIが物語に組み込みます
       </div>
+      <div class="pattern-box">
+        <div class="pattern-title">👥 登場人物のパターン<span class="pattern-hint">よく使う組み合わせを保存して、次回は選ぶだけ</span></div>
+        <div class="pattern-row">
+          <select id="pattern-select"><option value="">（保存したパターンを選ぶ）</option></select>
+          <button class="mini-btn" id="pattern-load-btn">📥 読み込む</button>
+        </div>
+        <div class="pattern-row">
+          <button class="mini-btn" id="pattern-save-btn">💾 今の登場人物を新しいパターンに保存</button>
+          <button class="mini-btn" id="pattern-update-btn">🔄 選択中に上書き</button>
+          <button class="mini-btn" id="pattern-rename-btn">✏️ 名前</button>
+          <button class="mini-btn danger" id="pattern-delete-btn">🗑 削除</button>
+        </div>
+        <div class="pattern-msg" id="pattern-msg" style="display:none"></div>
+      </div>
     </div>
 
     <div class="input-wrap">
@@ -446,6 +482,14 @@ textarea#theme {
       <div class="field-hint">
         💡 世界観で「✏️ オリジナル」を選んだときは、ここに世界観も書いてください。<br>
         登場人物の性格・入れたい場面・展開・口調など、細かい指示もまとめて書けます（すべて物語に反映されます）。
+      </div>
+    </div>
+
+    <div class="input-wrap">
+      <div class="section-title">固定テーマ（いつも反映する設定）</div>
+      <textarea id="fixed-theme" rows="3" placeholder="例：もんちゃん（ハムスター）は日本語を話せる能力があり、オトハとコトハと話せる"></textarea>
+      <div class="field-hint">
+        📌 ここに書いたことは、毎回の物語に必ず反映されます。この家の決まりごと（ペットの設定・家族のルールなど）向け。保存されるので毎回書かなくてOK。
       </div>
     </div>
 
@@ -700,7 +744,7 @@ textarea#theme {
     </div>
 
     <div style="text-align:center;color:var(--dim);font-size:11px;margin-top:32px">
-      よみきかせの星 v1.6（音声キャッシュ・Aivisまとめ生成でクレジット節約）<br>
+      よみきかせの星 v1.7（登場人物パターン・固定テーマ）<br>
       作：しょーたろー
     </div>
   </div>
@@ -876,6 +920,10 @@ let state = {
   randomCasts: [],
   world: 'dragonquest',
   theme: '',
+  // いつも反映する設定（固定テーマ）。端末に保存
+  fixedTheme: appStore.getItem('yk_fixed_theme') || '',
+  // 登場人物のパターン [{ id, name, members, randomCasts, createdAt }]
+  castPatterns: JSON.parse(appStore.getItem('yk_cast_patterns') || '[]'),
   length: appStore.getItem('yk_length') || 'mid',
   story: null,
   apiKey: appStore.getItem('yk_apikey') || '',
@@ -1008,6 +1056,7 @@ function renderMembers() {
     row.querySelector('input').addEventListener('input', e => {
       state.members[idx].name = e.target.value;
       updateSummary();
+      saveCurrentCast();
     });
     const emojiBtn = row.querySelector('.emoji-toggle');
     if (emojiBtn) {
@@ -1025,6 +1074,7 @@ function renderMembers() {
     });
     wrap.appendChild(row);
   });
+  saveCurrentCast();
 }
 
 function renderAddBtns() {
@@ -1084,6 +1134,10 @@ function renderWorlds() {
 
 document.getElementById('theme').addEventListener('input', e => {
   state.theme = e.target.value;
+});
+document.getElementById('fixed-theme').addEventListener('input', e => {
+  state.fixedTheme = e.target.value;
+  appStore.setItem('yk_fixed_theme', state.fixedTheme);
 });
 
 // 長さ選択
@@ -1233,6 +1287,15 @@ ${valid.length === 0 ? '主人公の名前もあなたが決めて、世界観�
 ${themeText}
 ---`
     : '（自由）今回のトーンに合った題材を選ぶ';
+  // 固定テーマ：この家の決まりごと。毎回必ず反映させる（ランダム物語でも同じ）
+  const fixedText = (state.fixedTheme || '').trim();
+  const fixedBlock = fixedText
+    ? `
+【いつもの設定】（この家の決まりごと。毎回必ず物語に反映すること。登場するキャラはセリフ付きで出す）
+---
+${fixedText}
+---`
+    : '';
 
   const prompt = `あなたは物語の名手です。${lenCfg.mins}（${lenCfg.range}）の読み聞かせ向け物語を作ってください。
 
@@ -1269,7 +1332,7 @@ ${randomCastInstruction}
 ${randomStoryInstruction}
 
 【世界観】${worldPrompt}
-【テーマ・要素・細かい設定】${themeBlock}
+【テーマ・要素・細かい設定】${themeBlock}${fixedBlock}
 ${valid.length > 0 ? `【実在の登場人物】（全員を必ずセリフ付きで登場させる）\n${castLines}` : ''}
 
 タイトルと本文だけ出力。余計な前置き・解説は一切不要。`;
@@ -1549,6 +1612,7 @@ ${result}
       randomCastNameMap, // 架空キャラ名→声情報
       ttsEngine: state.ttsEngine, // 生成時に使用していたエンジン（再生時の参考）
       theme: state.theme,
+      fixedTheme: state.fixedTheme,
       createdAt: Date.now(),
     };
 
@@ -4563,6 +4627,7 @@ document.getElementById('aivis-preview-voice').addEventListener('click', async (
 
 // =========================== 架空キャラ UI ===========================
 function renderRandomCasts() {
+  saveCurrentCast();
   const wrap = document.getElementById('random-casts');
   wrap.innerHTML = '';
   if (state.randomCasts.length === 0) {
@@ -4718,6 +4783,122 @@ document.getElementById('add-random-cast').addEventListener('click', async () =>
     ageBand: inferred.ageBand,
   });
   renderRandomCasts();
+});
+
+// =========================== 登場人物のパターン ===========================
+// 今の登場人物（実在＋架空）は常に端末に残し、次回そのまま復元する。
+// よく使う組み合わせは名前を付けてパターンとして保存し、選ぶだけで呼び出せる。
+function saveCurrentCast() {
+  try { appStore.setItem('yk_cast_current', JSON.stringify({ members: state.members, randomCasts: state.randomCasts })); } catch (_) {}
+}
+function restoreCurrentCast() {
+  try {
+    const cur = JSON.parse(appStore.getItem('yk_cast_current') || 'null');
+    if (cur && Array.isArray(cur.members)) applyCastSnapshot(cur, true);
+  } catch (_) {}
+}
+function currentCastSnapshot() {
+  return { members: JSON.parse(JSON.stringify(state.members)), randomCasts: JSON.parse(JSON.stringify(state.randomCasts)) };
+}
+// snap を今の登場人物にする。silent=true は初期化時（描画は呼び出し側）
+function applyCastSnapshot(snap, silent) {
+  const members = (snap.members || [])
+    .filter(m => m && MEMBER_PRESETS.some(p => p.role === m.role))
+    .map(m => ({ role: m.role, name: m.name || '', gender: m.gender || '' }));
+  state.members = members.length ? members : [{ role: 'child', name: '' }];
+  state.randomCasts = Array.isArray(snap.randomCasts) ? snap.randomCasts.map(rc => Object.assign({}, rc)) : [];
+  if (silent) return;
+  renderMembers();
+  renderAddBtns();
+  updateSummary();
+  renderRandomCasts();
+}
+function saveCastPatterns() {
+  appStore.setItem('yk_cast_patterns', JSON.stringify(state.castPatterns));
+}
+function castPatternSummary(p) {
+  const names = (p.members || []).filter(m => m.name && m.name.trim()).map(m => m.name.trim());
+  const rc = (p.randomCasts || []).length;
+  return names.concat(rc ? ['架空キャラ' + rc] : []).join('・') || '（名前なし）';
+}
+function selectedCastPattern() {
+  const id = document.getElementById('pattern-select').value;
+  return state.castPatterns.find(p => p.id === id) || null;
+}
+function renderCastPatterns(selectId) {
+  const sel = document.getElementById('pattern-select');
+  const cur = selectId !== undefined ? selectId : sel.value;
+  sel.innerHTML = '<option value="">（保存したパターンを選ぶ）</option>';
+  state.castPatterns.forEach(p => {
+    const o = document.createElement('option');
+    o.value = p.id;
+    o.textContent = p.name + '：' + castPatternSummary(p);
+    sel.appendChild(o);
+  });
+  sel.value = state.castPatterns.some(p => p.id === cur) ? cur : '';
+  updatePatternButtons();
+}
+function updatePatternButtons() {
+  const has = !!selectedCastPattern();
+  ['pattern-load-btn', 'pattern-update-btn', 'pattern-rename-btn', 'pattern-delete-btn'].forEach(id => {
+    document.getElementById(id).disabled = !has;
+  });
+}
+function showPatternMsg(msg) {
+  const el = document.getElementById('pattern-msg');
+  el.textContent = msg;
+  el.style.display = 'block';
+  clearTimeout(showPatternMsg._t);
+  showPatternMsg._t = setTimeout(() => { el.style.display = 'none'; }, 3000);
+}
+document.getElementById('pattern-select').addEventListener('change', updatePatternButtons);
+document.getElementById('pattern-save-btn').addEventListener('click', () => {
+  const valid = state.members.filter(m => m.name.trim());
+  if (!valid.length && !state.randomCasts.length) { alert('登場人物の名前を入れてから保存してください'); return; }
+  const defName = 'パターン' + (state.castPatterns.length + 1);
+  const name = (prompt('パターンの名前を入力してください', defName) || '').trim();
+  if (!name) return;
+  const p = Object.assign({ id: 'cp_' + Date.now(), name, createdAt: Date.now() }, currentCastSnapshot());
+  state.castPatterns.push(p);
+  saveCastPatterns();
+  renderCastPatterns(p.id);
+  appStore.setItem('yk_cast_pattern_last', p.id);
+  showPatternMsg('💾 「' + name + '」として保存しました');
+});
+document.getElementById('pattern-load-btn').addEventListener('click', () => {
+  const p = selectedCastPattern();
+  if (!p) return;
+  applyCastSnapshot(p);
+  appStore.setItem('yk_cast_pattern_last', p.id);
+  showPatternMsg('📥 「' + p.name + '」を読み込みました');
+});
+document.getElementById('pattern-update-btn').addEventListener('click', () => {
+  const p = selectedCastPattern();
+  if (!p) return;
+  if (!confirm('「' + p.name + '」を今の登場人物で上書きしますか？')) return;
+  Object.assign(p, currentCastSnapshot(), { updatedAt: Date.now() });
+  saveCastPatterns();
+  renderCastPatterns(p.id);
+  showPatternMsg('🔄 「' + p.name + '」を上書きしました');
+});
+document.getElementById('pattern-rename-btn').addEventListener('click', () => {
+  const p = selectedCastPattern();
+  if (!p) return;
+  const name = (prompt('新しい名前', p.name) || '').trim();
+  if (!name) return;
+  p.name = name;
+  saveCastPatterns();
+  renderCastPatterns(p.id);
+});
+document.getElementById('pattern-delete-btn').addEventListener('click', () => {
+  const p = selectedCastPattern();
+  if (!p) return;
+  if (!confirm('「' + p.name + '」を削除しますか？（今の登場人物はそのまま残ります）')) return;
+  state.castPatterns = state.castPatterns.filter(x => x.id !== p.id);
+  saveCastPatterns();
+  if (appStore.getItem('yk_cast_pattern_last') === p.id) appStore.removeItem('yk_cast_pattern_last');
+  renderCastPatterns('');
+  showPatternMsg('🗑 削除しました');
 });
 
 // =========================== 物語ランダム生成ボタン ===========================
@@ -4944,22 +5125,26 @@ function escapeHtml(s) {
 function escapeAttr(s) { return escapeHtml(s); }
 
 // =========================== Init ===========================
+restoreCurrentCast(); // 前回の登場人物を復元（名前を毎回入れ直さなくてよいように）
 renderMembers();
 renderAddBtns();
+updateSummary();
 renderWorlds();
 renderRandomCasts();
+renderCastPatterns(appStore.getItem('yk_cast_pattern_last') || '');
+document.getElementById('fixed-theme').value = state.fixedTheme;
 updateRandomStoryBtnVisibility();
 checkApiWarning();
-// 各エンジンの声リストをバックグラウンドで先読み
+// 各エンジンの声リストをバックグラウンドで先読み（読み込めたら架空キャラの声の選択欄を描き直す）
 if (state.fishKey && state.fishVoices.length === 0) {
-  loadFishVoices().catch(() => {});
+  loadFishVoices().then(() => renderRandomCasts()).catch(() => {});
 }
 if (state.elKey && state.elVoices.length === 0) {
   loadElevenLabsVoices().catch(() => {});
 }
 // Aivisはプリセットなのでキー無しでも常にロード
 if (state.aivisVoices.length === 0) {
-  loadAivisModels().catch(() => {});
+  loadAivisModels().then(() => renderRandomCasts()).catch(() => {});
 }
 
 // ======================================================================
