@@ -746,6 +746,11 @@ textarea#fixed-theme {
           <button class="mini-btn" id="tts-log-clear">🧹 消す</button>
         </div>
       </details>
+      <label class="check-row" style="margin-top:14px">
+        <input type="checkbox" id="aivis-batch-toggle">
+        Aivisのまとめ生成を使う（同じ人のセリフを1回で作る。1分10回の制限に当たりにくい）
+      </label>
+      <div id="nobatch-info" style="font-size:11px;color:var(--dim);line-height:1.6;margin:-4px 0 0 26px"></div>
       <div style="margin-top:14px;font-size:12px;color:var(--dim);line-height:1.6;background:rgba(0,0,0,0.25);border-radius:8px;padding:8px 10px">
         🎧 音声キャッシュ：<span id="unit-cache-stats">計算中…</span><br>
         <span style="opacity:.85">同じ文・同じ声の音声は端末に残して二度と作りません（よみあげ・試し聞き・音声の保存で共通）。Aivisは話者ごとにまとめて1回で作ります。バックアップには含まれません。</span>
@@ -755,7 +760,7 @@ textarea#fixed-theme {
     </div>
 
     <div style="text-align:center;color:var(--dim);font-size:11px;margin-top:32px">
-      よみきかせの星 v1.9.1（待機表示の折り返し）<br>
+      よみきかせの星 v1.9.2（まとめ生成の失敗時は1行ずつに固定・設定でオフ可）<br>
       作：しょーたろー
     </div>
   </div>
@@ -935,6 +940,8 @@ let state = {
   fixedTheme: appStore.getItem('yk_fixed_theme') || '',
   // 登場人物のパターン [{ id, name, members, randomCasts, createdAt }]
   castPatterns: JSON.parse(appStore.getItem('yk_cast_patterns') || '[]'),
+  // Aivis のまとめ生成（同じ話者のセリフを1回で作る）を使うか。うまくいかないときは設定でオフにできる
+  aivisBatch: appStore.getItem('yk_aivis_batch') !== '0',
   length: appStore.getItem('yk_length') || 'mid',
   story: null,
   apiKey: appStore.getItem('yk_apikey') || '',
@@ -1021,6 +1028,7 @@ document.querySelectorAll('.tab').forEach(t => {
     if (t.dataset.tab === 'history') renderHistory();
     if (t.dataset.tab === 'settings') {
       refreshUnitCacheStats();
+      renderBatchSetting();
       document.getElementById('api-key').value = state.apiKey;
       document.getElementById('gemini-key').value = state.geminiKey;
       document.getElementById('model-select').value = state.model;
@@ -2876,6 +2884,17 @@ function rememberBadBatch(key) {
   badBatchKeys.add(key);
   try { appStore.setItem('yk_bad_batches', JSON.stringify(Array.from(badBatchKeys).slice(-300))); } catch (_) {}
 }
+// まとめ生成が一度でも失敗した声（voiceId）。この端末では以後1行ずつ作る（失敗のたびに分割を試して回数を増やさない）
+const noBatchVoices = new Set(JSON.parse(appStore.getItem('yk_nobatch_voices') || '[]'));
+function rememberNoBatchVoice(voiceId, speaker) {
+  if (noBatchVoices.has(voiceId)) return;
+  noBatchVoices.add(voiceId);
+  try { appStore.setItem('yk_nobatch_voices', JSON.stringify(Array.from(noBatchVoices))); } catch (_) {}
+  ttsLog('[まとめ生成] ' + (speaker || '') + ' の声（' + String(voiceId).slice(0, 8) + '…）は以後1行ずつ作ります（設定タブでリセットできます）');
+}
+function batchAllowedFor(voiceId) {
+  return state.aivisBatch !== false && !noBatchVoices.has(voiceId);
+}
 let unitPruning = false;
 async function pruneUnitCache() {
   if (unitPruning) return;
@@ -2969,10 +2988,11 @@ async function buildAudioPlan(story, segsOverride) {
     let chunk = [], len = 0;
     // 行の集まりを「まとめ」にする。以前に切り分けが合わなかったまとめなら、半分ずつに分けて計画する
     const planLines = async (lines) => {
-      if (lines.length === 1) {
-        const line = lines[0];
-        units.set(line.key, { key: line.key, type: 'single', engine: 'aivis', voiceId: g.voiceId, speaker: g.speaker, text: line.text, segmentIndexes: [line.i] });
-        segments[line.i].sources.push({ key: line.key, slice: null });
+      if (lines.length === 1 || !batchAllowedFor(g.voiceId)) {
+        for (const line of lines) {
+          units.set(line.key, { key: line.key, type: 'single', engine: 'aivis', voiceId: g.voiceId, speaker: g.speaker, text: line.text, segmentIndexes: [line.i] });
+          segments[line.i].sources.push({ key: line.key, slice: null });
+        }
         return;
       }
       const text = lines.map(l => l.text).join('\n');
@@ -3170,7 +3190,7 @@ async function resolveAivisLines(lines, voiceId, speaker, sess) {
   }
   const text = lines.map(l => l.text).join('\n');
   const key = await unitKeyOf('aivis', voiceId, 'b' + UNIT_AIVIS_BITRATE + '|gap' + UNIT_GAP_SECONDS, text);
-  if (!badBatchKeys.has(key) && !sess.badBatches.has(key)) {
+  if (batchAllowedFor(voiceId) && !badBatchKeys.has(key) && !sess.badBatches.has(key)) {
     const u = { key, type: 'batch', engine: 'aivis', voiceId, speaker, text, segmentIndexes: lines.map(l => l.i), lines: lines.slice() };
     try {
       const r = await resolveUnit(u, sess);
@@ -3180,13 +3200,12 @@ async function resolveAivisLines(lines, voiceId, speaker, sess) {
       sess.badBatches.add(key);
     }
   }
-  const mid = Math.ceil(lines.length / 2);
-  ttsLog('[まとめ生成] ' + speaker + ' の' + lines.length + '行を ' + mid + '行＋' + (lines.length - mid) + '行に分けて作ります');
-  const halves = await Promise.all([
-    resolveAivisLines(lines.slice(0, mid), voiceId, speaker, sess),
-    resolveAivisLines(lines.slice(mid), voiceId, speaker, sess),
-  ]);
-  return halves[0].concat(halves[1]);
+  // まとめが使えなかった声は、この端末では以後1行ずつ（半分ずつの再試行はしない：失敗が続くと回数が倍増するため）
+  rememberNoBatchVoice(voiceId, speaker);
+  ttsLog('[まとめ生成] ' + speaker + ' の' + lines.length + '行を1行ずつ作ります');
+  const results = [];
+  for (const line of lines) results.push((await resolveAivisLines([line], voiceId, speaker, sess))[0]);
+  return results;
 }
 // 計画上の「まとめ」1つにつき1回だけ動かす（同じセッションの他のセグメントと共有）
 function resolveBatchGroup(unit, sess) {
@@ -5312,6 +5331,27 @@ document.getElementById('backup-file').addEventListener('change', async (e) => {
     btn.disabled = false;
     btn.textContent = orig;
   }
+});
+
+function renderBatchSetting() {
+  const cb = document.getElementById('aivis-batch-toggle');
+  if (cb) cb.checked = state.aivisBatch !== false;
+  const info = document.getElementById('nobatch-info');
+  if (!info) return;
+  if (noBatchVoices.size === 0) { info.textContent = 'まとめ生成がうまくいかなかった声は、自動で1行ずつに切り替わります。'; return; }
+  info.innerHTML = '自動で1行ずつに切り替えた声：' + noBatchVoices.size + '件 ' +
+    '<button class="mini-btn" id="nobatch-reset" style="padding:2px 8px;font-size:11px">🔄 もう一度まとめ生成を試す</button>';
+  document.getElementById('nobatch-reset').addEventListener('click', () => {
+    noBatchVoices.clear();
+    appStore.removeItem('yk_nobatch_voices');
+    badBatchKeys.clear();
+    appStore.removeItem('yk_bad_batches');
+    renderBatchSetting();
+  });
+}
+document.getElementById('aivis-batch-toggle').addEventListener('change', (e) => {
+  state.aivisBatch = e.target.checked;
+  appStore.setItem('yk_aivis_batch', state.aivisBatch ? '1' : '0');
 });
 
 function renderTtsLog() {
